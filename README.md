@@ -104,6 +104,7 @@ curldb query 'header:tags=iot'
 
 ```
 POST /<anything>     stored as received (request line, all headers, body), 201 + Location: /<id>
+                     Link: </id>; rel="parent" on the POST names the record this one answers
 POST /  + Content-Type: message/http
                      the body is the record: a response or a request stored as itself, no outer envelope
 GET  /<id>           the stored bytes as they are; Content-Type says what they are
@@ -114,6 +115,8 @@ GET  /stats          same as curldb stats
 ```
 
 The body of `GET /<id>` is the raw column, and `Content-Type` names it: `message/http` for a request or response, `text/markdown` for a note, `text/plain` for raw text, `application/octet-stream` for raw bytes that are not text. The other headers describe the record: `X-Id`, `X-Kind`, `X-Status` or `X-Method`, `X-Path`, `Last-Modified` (when it was stored), `X-Last` (the tail), and `Link` with `rel="prev"` and `rel="next"`. `HEAD /<id>` is one line of `curldb ls` in header form.
+
+A record can name the record it answers. Either the message itself carries `Link: </12>; rel="parent"`, or the POST that delivers it does; `curldb add --parent 12` is the same thing from the CLI. The Link target is a record id (`</12>`) or an address, matched against the `Content-Location` header of an earlier record (the pi extension writes `Content-Location: /chat/<id>` on every message and links parents that way). The pairing is kept in the index, so `GET /13` answers with `Link: </12>; rel="parent"`, `parent=12` lists every reply to 12, and one request can have any number of replies.
 
 `GET /` and `HEAD /` answer with `X-Last: <highest id>`. Ids are never reused, so that number is both the record count and the tail of the log; a consumer polls `HEAD /` and reads `/<n>` from where it left off.
 
@@ -136,7 +139,7 @@ Bound to localhost, no token. The trust model is the CLI's: whoever can run curl
 
 ### Reading a file in the browser
 
-[curldb.ai/viewer.html](https://curldb.ai/viewer.html) (also `docs/viewer.html` in the repo) opens a session file dropped onto it: same query language, a tag panel, one record at a time with its raw envelope. Three panes, mail-client style: tags, list, reading pane; each side folds, the reading pane can take the full width, and the widths drag. Keys: `j`/`k` move, `Enter` opens, `Esc` closes, `/` searches, `[` and `]` fold the side panes, `f` is full width. A body is shown by the `Content-Type` the message itself carries: images, audio, video and PDF render; HTML renders in a sandboxed frame with no scripts and no network; JSON is pretty-printed; markdown, CSV, diffs, form data, nested `message/http` and multipart parts render as what they are; everything else is text, and bytes that are not text get a hex dump. `source` shows the record as stored, `save raw` downloads the record bytes, `save body` the body alone. SQLite runs in the tab as WebAssembly; the file never leaves the machine and `serve` is not involved. `serve` stays curl-only and sends no CORS headers, so no web page can read the archive through it.
+[curldb.ai/viewer.html](https://curldb.ai/viewer.html) (`docs/viewer.html` plus `docs/viewer/` in the repo: markup, stylesheet, `render.js` for parsing and rendering, `app.js` for the page) opens a session file dropped onto it: same query language, a tag panel, one record at a time with its raw envelope. Three panes, mail-client style: tags, list, reading pane; each side folds, the reading pane can take the full width, and the widths drag. Keys: `j`/`k` move, `Enter` opens, `Esc` closes, `/` searches, `[` and `]` fold the side panes, `f` is full width. A body is shown by the `Content-Type` the message itself carries: images, audio, video and PDF render; HTML renders in a sandboxed frame with no scripts and no network; JSON is pretty-printed; markdown, CSV, diffs, form data, nested `message/http` and multipart parts render as what they are; everything else is text, and bytes that are not text get a hex dump. Above every record the viewer prints the receipt: the headers `GET /<id>` would answer with (`X-Id`, `X-Kind`, `Last-Modified`, `Link` with parent, prev and next), so the pairing is visible as header lines. `source` shows the record as stored, `save raw` downloads the record bytes, `save body` the body alone, `copy as curl` turns a stored request back into a curl command. Related records (the parent and the children of the open record) sit in a folded section; expanding it previews them with the interval between them. The list marks a reply with `re #12` and the interval since its parent. Search folds to a summary chip when not being edited; `?` shows the syntax and the keys. SQLite runs in the tab as WebAssembly; the file never leaves the machine and `serve` is not involved. Chrome refuses to open files under system folders such as `AppData` through the live picker (the message mentions system files); keep session files in a normal folder. `serve` stays curl-only and sends no CORS headers, so no web page can read the archive through it.
 
 ## Querying afterwards
 
@@ -346,6 +349,7 @@ curldb query 'header:tags=iot'
 
 ```
 POST /<anything>     收到什么存什么(请求行、所有 header、body),201 + Location: /<id>
+                     POST 上带 Link: </id>; rel="parent",表示这条是回哪条的
 POST /  + Content-Type: message/http
                      body 本身就是记录:一条 response 或 request 按它本来的样子存,不套外层
 GET  /<id>           存的字节原样,Content-Type 说明它是什么
@@ -356,6 +360,8 @@ GET  /stats          同 curldb stats
 ```
 
 `GET /<id>` 的 body 是 raw 列,`Content-Type` 说明它是什么:request 和 response 是 `message/http`,note 是 `text/markdown`,raw 是 `text/plain`,不是文本的 raw 字节是 `application/octet-stream`。其余 header 描述这条记录:`X-Id`、`X-Kind`、`X-Status` 或 `X-Method`、`X-Path`、`Last-Modified`(存入时间)、`X-Last`(尾巴)、`Link` 的 `rel="prev"` 和 `rel="next"`。`HEAD /<id>` 就是 `curldb ls` 里的一行,换成 header 的样子。
+
+一条记录可以说明自己是回哪条的。消息里自己带 `Link: </12>; rel="parent"`,或者送它进来的那个 POST 带,效果一样;命令行是 `curldb add --parent 12`。Link 指向的可以是记录编号(`</12>`),也可以是一个地址,按更早那条记录的 `Content-Location` 头匹配(pi 扩展给每条消息写 `Content-Location: /chat/<id>`,就是这么配的)。配对记在索引里,所以 `GET /13` 的外层带 `Link: </12>; rel="parent"`,`parent=12` 列出回 12 的所有记录,一个请求可以有任意多个回复。
 
 `GET /` 和 `HEAD /` 带 `X-Last: <最大编号>`。编号不复用,所以这个数既是记录总数也是日志的尾巴;消费者 `HEAD /` 看尾巴动没动,从自己记住的位置往后 `GET /<n>`。
 
@@ -378,7 +384,7 @@ AI 可以直接 curl 进来。本身已经是 HTTP 消息的东西(以 `HTTP/1.1
 
 ### 在浏览器里看一个文件
 
-[curldb.ai/viewer.html](https://curldb.ai/viewer.html)(仓库里是 `docs/viewer.html`)把 session 文件拖进去就能看:同一套查询语法、tag 面板、逐条看原始信封。三栏,邮件客户端的样子:tag、列表、阅读窗;两边都能收起,阅读窗可以铺满,宽度可拖。按键:`j`/`k` 上下,`Enter` 打开,`Esc` 关闭,`/` 搜索,`[` 和 `]` 收放两侧,`f` 铺满。body 按消息自己带的 `Content-Type` 显示:图片、音频、视频、PDF 直接渲染;HTML 在 sandbox 的 iframe 里渲染,不跑脚本不联网;JSON 格式化;markdown、CSV、diff、表单、套在里面的 `message/http`、multipart 各按本来的样子渲染;其余当文本,不是文本的字节给十六进制。`source` 看存的原样,`save raw` 下载整条记录的字节,`save body` 只下载 body。SQLite 以 WebAssembly 跑在标签页里,文件不离开这台机器,和 `serve` 无关。`serve` 只给 curl 用,不发 CORS 头,任何网页都读不到档案。
+[curldb.ai/viewer.html](https://curldb.ai/viewer.html)(仓库里是 `docs/viewer.html` 加 `docs/viewer/`:页面、样式、负责解析渲染的 `render.js`、负责页面逻辑的 `app.js`)把 session 文件拖进去就能看:同一套查询语法、tag 面板、逐条看原始信封。三栏,邮件客户端的样子:tag、列表、阅读窗;两边都能收起,阅读窗可以铺满,宽度可拖。按键:`j`/`k` 上下,`Enter` 打开,`Esc` 关闭,`/` 搜索,`[` 和 `]` 收放两侧,`f` 铺满。body 按消息自己带的 `Content-Type` 显示:图片、音频、视频、PDF 直接渲染;HTML 在 sandbox 的 iframe 里渲染,不跑脚本不联网;JSON 格式化;markdown、CSV、diff、表单、套在里面的 `message/http`、multipart 各按本来的样子渲染;其余当文本,不是文本的字节给十六进制。每条记录上方先印一段收据,就是 `GET /<id>` 外层会回的那几个 header(`X-Id`、`X-Kind`、`Last-Modified`、带 parent、prev、next 的 `Link`),配对关系直接以 header 的形式看得见。`source` 看存的原样,`save raw` 下载整条记录的字节,`save body` 只下载 body,`copy as curl` 把存的请求变回一条 curl 命令。打开一条记录,它的 parent 和 children 收在一个折叠区里,展开才渲染,连同彼此之间的间隔。列表里回复标 `re #12` 和距离 parent 的间隔。搜索框不编辑时折成一个摘要,`?` 展开语法和按键。SQLite 以 WebAssembly 跑在标签页里,文件不离开这台机器,和 `serve` 无关。Chrome 的 live 选择器不让打开 `AppData` 这类系统目录下的文件(提示里会说系统文件),session 文件放在普通目录里。`serve` 只给 curl 用,不发 CORS 头,任何网页都读不到档案。
 
 ## 事后查
 
@@ -429,6 +435,7 @@ header:X-Verdict        header 存在
 header:X-Verdict=solid  header 值等于
 body~fork               body 全文搜索
 body~"exact phrase"     body 短语搜索
+parent=12               回 12 号的记录
 anyword                 裸词,body 搜索
 ```
 

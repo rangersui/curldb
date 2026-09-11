@@ -1,16 +1,15 @@
 // Run: node --test tests/test_viewer.mjs
-// Execute the actual inline viewer script with DOM/SQLite/I/O doubles; no CDN or browser needed.
+// Execute the actual viewer scripts (docs/viewer/render.js + app.js) with
+// DOM/SQLite/I/O doubles; no CDN or browser needed.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { test } from 'node:test';
 
 const html = readFileSync(new URL('../docs/viewer.html', import.meta.url), 'utf8');
-const source = html.match(/<script>\s*([\s\S]*?)<\/script>/)[1].replace(/\}\)\(\);\s*$/, `
-  globalThis.hooks = { buildSql, openFile, poll, stopLive, live, splitEnvelope, isText, sniff, htmlFrame,
-    renderMarkdown, prettyJson, parseCsv, frontMatter, parseMultipart, hexDump, diffHtml, headLines,
-    getDb: function () { return db; }, seq: function () { return renderSeq; } };
-})();`);
+const scripts = Array.from(html.matchAll(/<script src="(viewer\/[^"]+)"><\/script>/g), m => m[1]);
+assert.deepEqual(scripts, ['viewer/render.js', 'viewer/app.js'], 'viewer.html loads the two page scripts in order');
+const sources = scripts.map(p => readFileSync(new URL('../docs/' + p, import.meta.url), 'utf8'));
 function deferred() {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -21,15 +20,21 @@ function file(name, marker) {
 }
 function harness(options = {}) {
   const elements = new Map(), timers = new Map(), databases = [];
-  let timerId = 0;
+  let timerId = 0, focused = null, blobId = 0;
+  const documentEvents = new Map();
   function element() {
-    return { textContent: '', innerHTML: '', hidden: false, className: '',
+    const events = new Map(), attributes = new Map();
+    return { textContent: '', innerHTML: '', hidden: false, className: '', tagName: 'DIV', open: false,
       value: '', children: [], style: { setProperty() {}, getPropertyValue() {} },
-      classList: { add() {}, remove() {}, toggle() {} }, addEventListener() {},
-      querySelectorAll: () => [], appendChild(child) { this.children.push(child); }, focus() {} };
+      classList: { add() {}, remove() {}, toggle() {} },
+      setAttribute(n, v) { attributes.set(n, v); }, getAttribute(n) { return attributes.get(n); },
+      addEventListener(n, fn) { if (!events.has(n)) events.set(n, []); events.get(n).push(fn); },
+      dispatch(n, e = {}) { for (const fn of events.get(n) || []) fn.call(this, { target: this, ...e }); },
+      querySelectorAll: () => [], appendChild(child) { this.children.push(child); },
+      focus() { focused = this; }, select() {}, blur() { focused = null; } };
   }
   function getElement(id) {
-    if (!elements.has(id)) elements.set(id, element());
+    if (!elements.has(id)) { const el = element(); if (id === 'q') el.tagName = 'INPUT'; elements.set(id, el); }
     return elements.get(id);
   }
   class Database {
@@ -46,21 +51,25 @@ function harness(options = {}) {
         options.failQueryOnce.delete(this.marker);
         throw new Error('synthetic query failure');
       }
-      const data = sql.startsWith('SELECT name, value, count') ? (options.headers ?? []) : [];
+      let data = sql.startsWith('SELECT name, value, count') ? (options.headers ?? []) : [];
       let i = -1;
-      return { bind() {}, step: () => ++i < data.length, getAsObject: () => data[i], free() {} };
+      return { bind(params) { if (options.query) data = options.query(sql, params); }, step: () => ++i < data.length, getAsObject: () => data[i], free() {} };
     }
   }
   const context = vm.createContext({
     document: { getElementById: getElement, createElement: element,
-      createTextNode: text => ({ textContent: text }), addEventListener() {} },
-    window: {}, navigator: {}, localStorage: { getItem: () => null }, TextDecoder, TextEncoder,
+      createTextNode: text => ({ textContent: text }), addEventListener(n, fn) { documentEvents.set(n, fn); } },
+    window: {}, navigator: {}, localStorage: { getItem: () => null }, TextDecoder, TextEncoder, Blob,
+    URL: { createObjectURL: () => 'blob:test-' + (++blobId), revokeObjectURL() {} },
     initSqlJs: () => options.ready ? options.ready.promise.then(() => ({ Database })) : Promise.resolve({ Database }),
     setTimeout: fn => { const id = ++timerId; timers.set(id, fn); return id; },
     clearTimeout: id => timers.delete(id),
   });
-  vm.runInContext(source, context);
-  return { h: context.hooks, el: getElement, timers, databases };
+  sources.forEach(src => vm.runInContext(src, context));
+  const CV = context.window.CV;
+  const h = Object.assign({}, CV, CV.app);
+  return { h, CV, el: getElement, timers, databases, focused: () => focused,
+    key(key, target) { documentEvents.get('keydown')({ key, target: target || getElement('list'), preventDefault() {} }); } };
 }
 
 test('quoted body phrases compile without stray quotes', () => {
@@ -259,4 +268,119 @@ test('sniff recognises text formats and headLines parses an envelope', () => {
   assert.match(head.html, /class="start err"/);
   assert.equal(head.bodyStart, 'HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n\r\n'.length);
   assert.equal(h.headLines(enc('just prose')), null);
+});
+
+test('curl command reproduces a stored request, quoting for the shell', () => {
+  const { h } = harness();
+  const enc = s => new TextEncoder().encode(s);
+  const head = h.headLines(enc("POST /chat HTTP/1.1\r\nHost: example.com\r\nContent-Length: 9\r\nX-Topic: it's\r\n\r\n"));
+  const cmd = h.curlCommand(head, enc("what's up"));
+  assert.ok(cmd.startsWith("curl -X POST 'http://example.com/chat'"), cmd);
+  assert.ok(cmd.includes("-H 'X-Topic: it'\\''s'"), cmd);
+  assert.ok(!cmd.includes('Content-Length'), 'framing headers are left to curl');
+  assert.ok(cmd.includes("--data-binary 'what'\\''s up'"), cmd);
+  assert.ok(h.curlCommand(head, new Uint8Array([0, 1])).includes('--data-binary @body.bin'));
+  assert.equal(h.curlCommand(h.headLines(enc('HTTP/1.1 200 OK\r\n\r\n')), enc('')), null);
+});
+
+test('parent links are read from Link headers and drive the query', () => {
+  const { h } = harness();
+  assert.equal(h.parseLinkParent('</12>; rel="parent"'), 12);
+  assert.equal(h.parseLinkParent('<https://x/>; rel="next", </7>; rel=parent'), 7);
+  assert.equal(h.parseLinkParent('</7>; rel="prev"'), null);
+  assert.equal(h.parseLinkParent('</chat/a5660953>; rel="parent"'), null);
+  assert.equal(h.parseLinkTarget('</chat/a5660953>; rel="parent"'), '/chat/a5660953');
+  const enc = s => new TextEncoder().encode(s);
+  const p = h.recordParts({ id: 13, kind: 'response', status: 200, path: null, ts: 1, raw: enc('HTTP/1.1 200 OK\r\nLink: </12>; rel="parent"\r\n\r\nok') });
+  assert.equal(p.parentInMessage, 12);
+  h.S.schema.parent = true;
+  const built = h.buildSql('parent=12');
+  assert.match(built.sql, /r\.parent = \?/);
+  assert.match(built.sql, /LEFT JOIN records p ON p\.id = r\.parent/);
+  assert.deepEqual(Array.from(built.params), [12]);
+});
+
+test('search folds without clearing filters; slash opens and Escape returns to list', () => {
+  const { h, el, key, focused } = harness();
+  assert.equal(el('query-editor').hidden, true);
+  key('/');
+  assert.equal(el('query-editor').hidden, false);
+  assert.equal(el('toggle-search').getAttribute('aria-expanded'), 'true');
+  assert.equal(focused(), el('q'));
+  el('q').value = 'status=500';
+  el('q').dispatch('input');
+  key('Escape', el('q'));
+  assert.equal(el('query-editor').hidden, true);
+  assert.equal(el('q').value, 'status=500');
+  assert.equal(el('query-summary-text').textContent, 'status=500');
+  assert.equal(el('query-summary').hidden, false);
+  assert.equal(focused(), el('list'));
+  el('clear-query').dispatch('click');
+  assert.equal(el('q').value, '');
+  assert.equal(el('query-summary').hidden, true);
+});
+
+test('focus mode temporarily hides search; help is explicit and dismissed first', () => {
+  const { h, el, key } = harness();
+  h.setSearchOpen(true);
+  h.setPane('focus', true);
+  assert.equal(el('query-editor').hidden, true);
+  h.setPane('focus', false);
+  assert.equal(el('query-editor').hidden, false);
+  el('toggle-help').dispatch('click');
+  assert.equal(el('query-help').hidden, false);
+  key('Escape');
+  assert.equal(el('query-help').hidden, true);
+  assert.equal(el('query-editor').hidden, false);
+});
+
+function recordFixture() {
+  const records = [
+    { id: 1, kind: 'request', method: 'GET', status: null, path: '/abc.py', ts: 1, preview: 'read file', raw: 'GET /abc.py HTTP/1.1\n\n' },
+    { id: 2, kind: 'response', method: null, status: 500, path: null, ts: 2, preview: 'failed', raw: 'HTTP/1.1 500 Error\nLink: </1>; rel="parent"\n\nfailed' },
+  ];
+  return (sql, params) => {
+    if (sql.includes('WHERE id = ?')) return records.filter(r => r.id === params[0]);
+    if (sql.includes("LOWER(h.name) = 'link'")) return params[0].includes('</1>') ? [records[1]] : [];
+    if (sql.startsWith('SELECT DISTINCT')) return records;
+    if (sql.startsWith('SELECT max(id)')) return [{ m: 2 }];
+    return [];
+  };
+}
+
+test('list exposes kind, method, status and resource separately', async () => {
+  const { h, el } = harness({ query: recordFixture() });
+  await h.openFile(file('records.sqlite', 1));
+  const content = el('list').innerHTML;
+  assert.match(content, /<span>Kind<\/span><span>Method<\/span><span>Status<\/span>/);
+  assert.match(content, /class="kind kind-request"[^>]*>request/);
+  assert.match(content, /class="kind kind-response"[^>]*>response/);
+  assert.match(content, /class="method"[^>]*>GET/);
+  assert.match(content, /class="status err"[^>]*>500/);
+  assert.match(content, /class="status "[^>]*>-/);
+  assert.match(content, /class="resource"[^>]*>\/abc.py/);
+});
+
+test('related records are folded and rendered only after expansion', async () => {
+  const { h, CV, el } = harness({ query: recordFixture() });
+  await h.openFile(file('records.sqlite', 1));
+  const rendered = [];
+  CV.renderRecord = async p => { rendered.push(p.row.id); return '<pre>fixture</pre>'; };
+  h.showRecord(1);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(rendered, [1]);
+  assert.match(el('detail').innerHTML, /<details class="related" id="related">/);
+  el('related').open = true;
+  el('related').dispatch('toggle');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(rendered, [1, 2]);
+  assert.match(el('related-body').innerHTML, /child/);
+  el('related').dispatch('toggle');
+  assert.deepEqual(rendered, [1, 2]);
+  h.showRecord(1);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(el('detail').innerHTML, /id="related" open>/, 'same record retains explicit expansion');
+  h.showRecord(2);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(el('detail').innerHTML, /id="related">/, 'another record starts folded');
 });

@@ -21,7 +21,7 @@ import time
 from email.utils import formatdate
 from http import HTTPStatus
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 DEFAULT_DB = "curldb.sqlite"
 
@@ -290,6 +290,21 @@ def _init(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_records_path ON records(path);
     """)
     _init_fts(conn)
+    # parent: the record this one answers (0.4). Older files get the
+    # column added; rows written before carry no parent.
+    cols = {c[1] for c in conn.execute("PRAGMA table_info(records)")}
+    if "parent" not in cols:
+        conn.executescript("""
+            ALTER TABLE records ADD COLUMN parent INTEGER;
+            CREATE INDEX IF NOT EXISTS idx_records_parent ON records(parent);
+        """)
+        # Rows written before the column: pair them from their Link headers.
+        for rid, link in conn.execute(
+                "SELECT record_id, value FROM headers WHERE LOWER(name) = 'link'").fetchall():
+            parent = resolve_link(link, conn)
+            if parent is not None and parent != rid:
+                conn.execute("UPDATE records SET parent = ? WHERE id = ?", (parent, rid))
+        conn.commit()
     for raw, ts in old_rows:
         add(raw, conn, ts=ts)
 
@@ -350,19 +365,25 @@ def _drop_v1(conn: sqlite3.Connection) -> list[tuple[str, float]]:
 
 
 def add(raw: bytes | str, conn: sqlite3.Connection | None = None,
-        ts: float | None = None, source_path: str | None = None) -> int:
-    """Store one raw record, as bytes. Returns the new record id."""
+        ts: float | None = None, source_path: str | None = None,
+        parent: int | None = None) -> int:
+    """Store one raw record, as bytes. Returns the new record id.
+
+    parent is the id of the record this one answers. When not given,
+    a Link header with rel="parent" inside the message supplies it."""
     if isinstance(raw, str):
         raw = raw.encode("utf-8")
     own = conn is None
     if own:
         conn = _connect()
     p = parse_envelope(raw, source_path)
+    if parent is None:
+        parent = _parent_from_headers(p["headers"], conn)
     cur = conn.execute(
-        "INSERT INTO records (kind, status, method, path, raw, body, ts)"
-        " VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO records (kind, status, method, path, raw, body, ts, parent)"
+        " VALUES (?,?,?,?,?,?,?,?)",
         (p["kind"], p["status"], p["method"], p["path"], raw, p["body"],
-         ts if ts is not None else time.time()))
+         ts if ts is not None else time.time(), parent))
     rid = cur.lastrowid
     if p["headers"]:
         conn.executemany(
@@ -372,6 +393,54 @@ def add(raw: bytes | str, conn: sqlite3.Connection | None = None,
     if own:
         conn.close()
     return rid
+
+
+_LINK_PARENT = re.compile(r'<\s*([^>]+?)\s*>\s*;\s*rel\s*=\s*"?parent"?', re.I)
+
+
+def parse_link_target(value: str | None) -> str | None:
+    """The target of a Link header with rel="parent": `</12>; rel="parent"`
+    gives "/12", `</chat/a5660953>; rel="parent"` gives "/chat/a5660953"."""
+    if not value:
+        return None
+    m = _LINK_PARENT.search(value)
+    return m.group(1) if m else None
+
+
+def parse_link_parent(value: str | None) -> int | None:
+    """The record id in a Link parent that names one directly: `</12>`."""
+    target = parse_link_target(value)
+    return int(target.lstrip("/")) if target and target.lstrip("/").isdigit() else None
+
+
+def resolve_link(value: str | None, conn: sqlite3.Connection | None = None) -> int | None:
+    """A Link parent as a record id. `</12>` is the id itself; any other
+    target is an address, matched against the Content-Location header of
+    an earlier record (the way the pi extension pairs its messages)."""
+    parent = parse_link_parent(value)
+    if parent is not None:
+        return parent
+    target = parse_link_target(value)
+    if not target:
+        return None
+    own = conn is None
+    if own:
+        conn = _connect()
+    row = conn.execute(
+        "SELECT record_id FROM headers WHERE LOWER(name) = 'content-location' AND value = ?"
+        " ORDER BY record_id LIMIT 1", (target,)).fetchone()
+    if own:
+        conn.close()
+    return int(row[0]) if row else None
+
+
+def _parent_from_headers(headers: list[tuple[str, str]], conn: sqlite3.Connection | None = None) -> int | None:
+    for name, value in headers:
+        if name.lower() == "link":
+            parent = resolve_link(value, conn)
+            if parent is not None:
+                return parent
+    return None
 
 
 def get(rid: int) -> bytes | None:
@@ -386,7 +455,7 @@ def get_row(rid: int) -> dict | None:
     conn = _connect()
     conn.row_factory = sqlite3.Row
     row = conn.execute(
-        "SELECT id, kind, status, method, path, ts, raw FROM records WHERE id=?",
+        "SELECT id, kind, status, method, path, ts, raw, parent FROM records WHERE id=?",
         (rid,)).fetchone()
     conn.close()
     if row is None:
@@ -444,6 +513,11 @@ def query(expr: str) -> list[dict]:
             wheres.append("r.method = ?")
             params.append(m.group(1).upper())
             continue
+        m = re.fullmatch(r"parent=(\d+)", token)
+        if m:
+            wheres.append("r.parent = ?")
+            params.append(int(m.group(1)))
+            continue
         m = re.fullmatch(r"path=(\S+)", token)
         if m:
             wheres.append("r.path = ?")
@@ -489,7 +563,7 @@ def query(expr: str) -> list[dict]:
 
     sql = f"""
         SELECT DISTINCT r.id, r.kind, r.status, r.method, r.path, r.ts,
-               substr(r.body, 1, 120)
+               substr(r.body, 1, 120), r.parent
         FROM records r
         {' '.join(joins)}
         WHERE {' AND '.join(wheres) if wheres else '1'}
@@ -503,7 +577,7 @@ def query(expr: str) -> list[dict]:
 
 def _row(r) -> dict:
     return {"id": r[0], "kind": r[1], "status": r[2], "method": r[3],
-            "path": r[4], "ts": r[5], "preview": r[6]}
+            "path": r[4], "ts": r[5], "preview": r[6], "parent": r[7]}
 
 
 def _tokenize(expr: str) -> list[str]:
@@ -528,7 +602,7 @@ def _tokenize(expr: str) -> list[str]:
 def ls(limit: int = 20) -> list[dict]:
     conn = _connect()
     rows = conn.execute("""
-        SELECT id, kind, status, method, path, ts, substr(body, 1, 80)
+        SELECT id, kind, status, method, path, ts, substr(body, 1, 80), parent
         FROM records ORDER BY id DESC LIMIT ?
     """, (limit,)).fetchall()
     conn.close()
@@ -671,6 +745,8 @@ def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
             last = last_id()
             self.send_header("X-Last", str(last))
             links = []
+            if row["parent"]:
+                links.append(f'</{row["parent"]}>; rel="parent"')
             if row["id"] > 1:
                 links.append(f'</{row["id"] - 1}>; rel="prev"')
             if row["id"] < last:
@@ -751,6 +827,10 @@ def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
                 if len(body) != length:
                     self._text(400, f"body ended after {len(body)} of {length} bytes" + chr(10))
                     return
+            # Link: </12>; rel="parent" on the door names the record this
+            # one answers. It is the post office's bookkeeping, like the id
+            # and the time; the stored message is not touched.
+            parent = resolve_link(self.headers.get("Link"))
             # message/http says the body IS an HTTP message. Store the body
             # itself and drop this request's envelope, so a response (or a
             # request) can be archived as what it is, not wrapped in a POST.
@@ -761,7 +841,7 @@ def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
                 if kind not in ("request", "response"):
                     self._text(400, "message/http body must start with a status line or a request line" + chr(10))
                     return
-                rid = add(body)
+                rid = add(body, parent=parent)
                 self._text(201, f"#{rid}" + chr(10), {"Location": f"/{rid}"})
                 return
             # http.server decodes the request line and headers as
@@ -780,7 +860,7 @@ def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
             if coding:
                 lines.append(f"Content-Length: {len(body)}")
             raw = ("\n".join(lines) + "\n\n").encode("utf-8") + body
-            rid = add(raw)
+            rid = add(raw, parent=parent)
             self._text(201, f"#{rid}\n", {"Location": f"/{rid}"})
 
         do_POST = _store
@@ -831,7 +911,8 @@ def _format_results(results: list[dict]) -> str:
     lines = []
     for r in results:
         preview = r["preview"].replace("\n", " ")[:60]
-        lines.append(f"  {r['id']:>5}  {_ts_short(r['ts'])}  {_label(r):<20}  {preview}")
+        re_ = f"re {r['parent']}" if r.get("parent") else ""
+        lines.append(f"  {r['id']:>5}  {_ts_short(r['ts'])}  {_label(r):<20}  {re_:<8}{preview}")
     return "\n".join(lines) + "\n"
 
 
@@ -886,7 +967,8 @@ HELP = """\
 curldb -- HTTP exchange datastore (one sqlite file per session)
 
   add [file]           store a raw HTTP request/response, a markdown file
-                       with --- front matter, or any bytes (stdin or file)
+                       with --- front matter, or any bytes (stdin or file);
+                       --parent <id> names the record this one answers
   wrap START [-H N:V]  wrap stdin body in an envelope; START is a status
                        code (200) or a request line (POST /chat)
   get <id>             print raw record by id
@@ -897,6 +979,8 @@ curldb -- HTTP exchange datastore (one sqlite file per session)
   stats                db stats
   serve [port]         HTTP door on 127.0.0.1 (default 200; root below 1024 on unix):
                        POST/PUT anything -> stored as received, 201 + Location
+                       Link: </id>; rel="parent" on the POST -> this record
+                       answers that one (also read from the message's own Link)
                        POST with Content-Type: message/http -> the body is the
                        record (a response or request stored as itself)
                        GET /<id> -> the stored bytes as they are: message/http for
@@ -910,7 +994,7 @@ curldb -- HTTP exchange datastore (one sqlite file per session)
 
 query DSL (tokens AND'd together):
   kind=request|response|note|raw   status=200   status=200,201
-  method=POST   path=/chat   path~/tool/
+  method=POST   path=/chat   path~/tool/   parent=12
   header:X-Verdict   header:X-Verdict=solid
   body~word   body~"a phrase"   anyword
 
@@ -942,6 +1026,11 @@ def cli(argv: list[str] | None = None) -> None:
 
     if cmd == "add":
         source = None
+        parent = None
+        if "--parent" in rest:
+            i = rest.index("--parent")
+            parent = _int_arg(rest, i + 1, "add --parent <id>")
+            del rest[i:i + 2]
         if rest and rest[0] != "-":
             source = rest[0]
             with open(source, "rb") as f:
@@ -950,7 +1039,7 @@ def cli(argv: list[str] | None = None) -> None:
             data = sys.stdin.buffer.read()
         if not data.strip():
             _die("empty input")
-        rid = add(data, source_path=source)
+        rid = add(data, source_path=source, parent=parent)
         p = parse_envelope(data, source)
         label = (p["status"] if p["kind"] == "response"
                  else f"{p['method']} {p['path']}" if p["kind"] == "request"

@@ -468,6 +468,62 @@ class HTTPTests(TemporaryDatabase):
                 self.assertEqual(status, 200)
                 self.assertEqual(headers["X-Path"].encode("latin-1").decode("utf-8"), path)
 
+    def test_parent_links_pair_records(self):
+        # The door's Link header is bookkeeping: the stored bytes stay as sent.
+        status, headers, _ = self.request("POST", "/chat", b"what about fork?")
+        req = int(headers["Location"].lstrip("/"))
+        reply = b"HTTP/1.1 200 OK\r\n\r\nfork is fine"
+        status, headers, _ = self.request("POST", "/", reply,
+                                          {"Content-Type": "message/http", "Link": f'</{req}>; rel="parent"'})
+        rep = int(headers["Location"].lstrip("/"))
+        status, got, body = self.request("GET", f"/{rep}")
+        self.assertEqual(body, reply)
+        self.assertIn(f'</{req}>; rel="parent"', got["Link"])
+        self.assertEqual([r["id"] for r in curldb.query(f"parent={req}")], [rep])
+        self.assertEqual(curldb.get_row(rep)["parent"], req)
+        # A Link inside the message works too, and fan-out is allowed.
+        second = curldb.add(f'HTTP/1.1 409 Conflict\r\nLink: </{req}>; rel="parent"\r\n\r\nno'.encode())
+        self.assertEqual(curldb.get_row(second)["parent"], req)
+        self.assertEqual(sorted(r["id"] for r in curldb.query(f"parent={req}")), [rep, second])
+        self.assertIn(f"re {req}", curldb._format_results(curldb.ls()))
+        self.assertEqual(curldb.parse_link_parent('<https://x/>; rel="next", </7>; rel=parent'), 7)
+        self.assertIsNone(curldb.parse_link_parent('</7>; rel="prev"'))
+
+    def test_parent_by_address_matches_content_location(self):
+        # The pi extension pairs by address: Content-Location on the request,
+        # Link </chat/x>; rel="parent" on the reply. Both resolve to the id.
+        req = curldb.add('POST /chat HTTP/1.1\r\nContent-Location: /chat/a5660953\r\n\r\nq')
+        rep = curldb.add('HTTP/1.1 200 OK\r\nContent-Location: /chat/4e384d75\r\nLink: </chat/a5660953>; rel="parent"\r\n\r\na')
+        self.assertEqual(curldb.get_row(rep)["parent"], req)
+        status, headers, _ = self.request("POST", "/", b"HTTP/1.1 200 OK\r\n\r\nb",
+                                          {"Content-Type": "message/http", "Link": '</chat/4e384d75>; rel="parent"'})
+        self.assertEqual(curldb.get_row(int(headers["Location"].lstrip("/")))["parent"], rep)
+        self.assertIsNone(curldb.get_row(curldb.add('HTTP/1.1 200 OK\r\nLink: </chat/nobody>; rel="parent"\r\n\r\nc'))["parent"])
+        self.assertEqual(curldb.parse_link_target('</chat/a5660953>; rel="parent"'), "/chat/a5660953")
+
+    def test_old_files_get_the_parent_column(self):
+        path = os.path.join(self.directory, "old.sqlite")
+        conn = sqlite3.connect(path)
+        conn.executescript("""
+            CREATE TABLE records (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
+                status INTEGER, method TEXT, path TEXT, raw TEXT NOT NULL,
+                body TEXT NOT NULL DEFAULT '', ts REAL NOT NULL);
+            INSERT INTO records (kind, status, raw, body, ts) VALUES ('response', 200, 'HTTP/1.1 200 OK\n\nold', 'old', 1);
+            CREATE TABLE headers (record_id INTEGER NOT NULL REFERENCES records(id), name TEXT NOT NULL, value TEXT NOT NULL DEFAULT '');
+            INSERT INTO records (kind, method, path, raw, body, ts) VALUES ('request', 'POST', '/chat', 'POST /chat HTTP/1.1\nContent-Location: /chat/aa\n\nq', 'q', 2);
+            INSERT INTO headers VALUES (2, 'Content-Location', '/chat/aa');
+            INSERT INTO records (kind, status, raw, body, ts) VALUES ('response', 200, 'HTTP/1.1 200 OK\nLink: </chat/aa>; rel="parent"\n\na', 'a', 3);
+            INSERT INTO headers VALUES (3, 'Link', '</chat/aa>; rel="parent"');
+        """)
+        conn.commit(); conn.close()
+        os.environ["CURLDB_PATH"] = path
+        rid = curldb.add(RAW, parent=1)
+        self.assertEqual(curldb.get_row(rid)["parent"], 1)
+        self.assertIsNone(curldb.get_row(1)["parent"])
+        self.assertEqual(curldb.get(1), b"HTTP/1.1 200 OK\n\nold")
+        # Existing rows were paired from their Link headers when the column arrived.
+        self.assertEqual(curldb.get_row(3)["parent"], 2)
+
     def test_last_id_header_and_stats(self):
         status, headers, _ = self.request("HEAD", "/")
         self.assertEqual((status, headers["X-Last"]), (200, "0"))
