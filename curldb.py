@@ -21,7 +21,7 @@ import time
 from email.utils import formatdate
 from http import HTTPStatus
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 DEFAULT_DB = "curldb.sqlite"
 
