@@ -315,10 +315,17 @@ $ curldb tags
 <p>Each reply prints as usual and lands in curldb with a number. Nothing was parsed on the way in; the headers the model wrote are the index. Query by status, any header, or full text of the body.</p>
 
 <h2>A post office</h2>
-<p>A post office takes anything with an address on it, keeps the envelope with the letter, does not open the letter, and stamps a number on the way in. That is the whole of curldb. What sits in the file is not a record about a request; it is the request, byte for byte, envelope and all. Same for a response.</p>
-<p>Because the stored thing is the real thing, it can be sent again. A stored request goes back out on the wire as a request:</p>
+<p>A post office takes anything with an address on it, keeps the envelope with the letter, does not open the letter, and stamps a number on the way in. That is the whole of curldb. What sits in the file is not a record about a request; it is the request as text, envelope and all. Same for a response.</p>
+<p>Because the stored thing is the message itself, it can be sent again. A stored request goes back out on the wire as a request:</p>
 <pre><code><span class="p">$</span> curl -s localhost:200/1 | nc example.com 80</code></pre>
-<p>A stored response can be handed to a client as a response, and the client cannot tell it from a live one. Replaying, mocking, forwarding through nginx, re-annotating with a different model: none of it needs a converter, because nothing was converted going in.</p>
+<p>And the other direction: a message that already is a message goes in as itself. <code>Content-Type: message/http</code> tells the post office that the body is the letter, envelope included, so a response is filed as a response:</p>
+<pre><code><span class="p">$</span> printf 'HTTP/1.1 409 Conflict
+X-Verdict: shaky
+
+that contradicts the earlier decision'     | curl -X POST localhost:200/ -H 'Content-Type: message/http' --data-binary @-
+<span class="ok">HTTP/1.1 201 Created</span>
+Location: /3</code></pre>
+<p>A stored response can be handed to a client as a response. Replaying, mocking, forwarding through nginx, re-annotating with a different model: none of it needs a converter, because nothing was converted going in.</p>
 <p>curldb keeps. Whoever sends, sends.</p>
 
 <h2>Four rules</h2>
@@ -405,10 +412,17 @@ $ curldb tags
 <p>每条回答照常打印出来,同时进了 curldb,拿到一个编号。进去的路上什么都没解析,模型自己写的 header 就是索引。按 status、任意 header、body 全文查。</p>
 
 <h2>一个邮局</h2>
-<p>邮局做的事:收下任何写了地址的东西,信封和信一起留着,不拆信,进门时盖个编号。curldb 全部就是这个。文件里躺着的不是「关于某个请求的记录」,是那个请求本身,一个字节不差,连信封带内容。response 也一样。</p>
-<p>存的既然是本体,就能再寄一次。一条存下来的请求,原样推回线上就还是一条请求:</p>
+<p>邮局做的事:收下任何写了地址的东西,信封和信一起留着,不拆信,进门时盖个编号。curldb 全部就是这个。文件里躺着的不是「关于某个请求的记录」,是那个请求的文本,连信封带内容。response 也一样。</p>
+<p>存的既然是消息本身,就能再寄一次。一条存下来的请求,原样推回线上就还是一条请求:</p>
 <pre><code><span class="p">$</span> curl -s localhost:200/1 | nc example.com 80</code></pre>
-<p>一条存下来的 response,交给某个客户端就是一条 response,客户端分不出它和现场的有什么区别。重放、mock、经 nginx 转发、换个模型重新标注:都不需要转换器,因为进来的时候什么都没转换。</p>
+<p>反过来也一样:本身已经是消息的东西,按原样进。<code>Content-Type: message/http</code> 告诉邮局 body 就是那封信,连信封在内,所以一条 response 存进去还是 response:</p>
+<pre><code><span class="p">$</span> printf 'HTTP/1.1 409 Conflict
+X-Verdict: shaky
+
+that contradicts the earlier decision'     | curl -X POST localhost:200/ -H 'Content-Type: message/http' --data-binary @-
+<span class="ok">HTTP/1.1 201 Created</span>
+Location: /3</code></pre>
+<p>一条存下来的 response,交给某个客户端就是一条 response。重放、mock、经 nginx 转发、换个模型重新标注:都不需要转换器,因为进来的时候什么都没转换。</p>
 <p>curldb 只管留着。谁要寄,谁寄。</p>
 
 <h2>四条规矩</h2>

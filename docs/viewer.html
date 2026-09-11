@@ -187,7 +187,7 @@
 
 <script>
 (function () {
-  var SQL = null, db = null, selected = null;
+  var SQL = null, db = null, selected = null, displayedGeneration = null;
   function $(id) { return document.getElementById(id); }
 
   // Sidebar width: drag the gutter; the value is kept in this browser.
@@ -221,20 +221,36 @@
     $("load-state").textContent = "sql.js failed to load: " + e;
   });
 
-  var live = { handle: null, timer: null, hash: null };
+  var live = { handle: null, timer: null, hash: null, generation: 0 };
 
-  function loadBuffer(buffer, name, size, mode) {
+  function loadBuffer(buffer, name, size, mode, generation) {
     return ready.then(function () {
+      if (generation !== live.generation) return false;
       var fresh;
       try {
         fresh = new SQL.Database(new Uint8Array(buffer));
         fresh.exec("SELECT id FROM records LIMIT 1");
+        fresh.exec("SELECT name, value FROM headers LIMIT 1");
       } catch (e) {
-        $("load-state").textContent = "not a curldb file: " + e.message;
-        return false;
+        if (fresh) fresh.close();
+        throw new Error("not a curldb file: " + e.message);
       }
-      if (db) db.close();
+      var previous = db, previousSelected = selected;
+      if (displayedGeneration !== generation) selected = null;
       db = fresh;
+      try {
+        renderTags();
+        if (!runQuery($("q").value)) throw new Error("could not query snapshot");
+        if (selected !== null) showRecord(selected);
+        else $("detail").innerHTML = '<div class="empty">Select a record.</div>';
+      } catch (e) {
+        db = previous;
+        selected = previousSelected;
+        fresh.close();
+        throw e;
+      }
+      if (previous) previous.close();
+      displayedGeneration = generation;
       var label = $("file-name");
       label.textContent = "";
       var b = document.createElement("b");
@@ -247,29 +263,35 @@
       m.textContent = mode === "live" ? "live" : "snapshot";
       $("drop").style.display = "none";
       $("app").classList.add("on");
-      renderTags();
-      runQuery($("q").value);
-      if (selected !== null) showRecord(selected);
+      $("load-state").textContent = "";
       return true;
     });
   }
 
-  function readInto(file, mode) {
-    return new Promise(function (resolve) {
-      var reader = new FileReader();
-      reader.onload = function () { resolve(loadBuffer(reader.result, file.name, file.size, mode)); };
-      reader.readAsArrayBuffer(file);
+  function readInto(file, mode, generation) {
+    return file.arrayBuffer().then(function (buffer) {
+      return loadBuffer(buffer, file.name, file.size, mode, generation);
     });
   }
 
   function stopLive() {
     clearTimeout(live.timer);
+    live.generation++;
     live.handle = null; live.timer = null; live.hash = null;
   }
 
   function openFile(file) {
     stopLive();
-    readInto(file, "snapshot").then(function () { $("q").focus(); });
+    var generation = live.generation;
+    return readInto(file, "snapshot", generation).then(function (loaded) {
+      if (loaded && generation === live.generation) $("q").focus();
+    }).catch(function (e) {
+      if (generation !== live.generation) return;
+      $("load-state").textContent = "file read failed: " + e.message;
+      $("mode").hidden = false;
+      $("mode").className = "mode";
+      $("mode").textContent = "file read failed: " + e.message;
+    });
   }
 
   // Live mode: keep a handle from the picker and re-read the file whenever
@@ -284,28 +306,39 @@
   }
 
   function poll() {
-    if (!live.handle) return;
-    live.handle.getFile().then(function (file) {
+    if (!live.handle) return Promise.resolve();
+    var generation = live.generation, handle = live.handle;
+    function current() { return generation === live.generation && handle === live.handle; }
+    return handle.getFile().then(function (file) {
+      if (!current()) return;
       return file.arrayBuffer().then(function (buffer) {
+        if (!current()) return;
         var h = checksum(buffer);
         var changed = h !== live.hash;
-        live.hash = h;
-        var done = changed ? loadBuffer(buffer, file.name, buffer.byteLength, "live") : Promise.resolve(true);
-        return done.then(function () {
+        var done = changed ? loadBuffer(buffer, file.name, buffer.byteLength, "live", generation) : Promise.resolve(true);
+        return done.then(function (loaded) {
+          if (!current() || !loaded) return;
+          live.hash = h;
           var m = $("mode");
           m.className = "mode live";
           m.textContent = "live " + new Date().toLocaleTimeString() + " " + Math.round(buffer.byteLength / 1024) + " KB";
         });
       });
     }).catch(function (e) {
+      if (!current()) return;
+      $("load-state").textContent = "live read failed: " + e.message;
+      $("mode").hidden = false;
       $("mode").textContent = "live read failed: " + e.message;
       $("mode").className = "mode";
-      stopLive();
-    }).then(function () { if (live.handle) live.timer = setTimeout(poll, 2000); });
+      // Retain the last good DB/hash and retry; a concurrent checkpoint can
+      // produce a temporarily unreadable file. Never label that read success.
+    }).then(function () { if (current()) live.timer = setTimeout(poll, 2000); });
   }
 
   function openLive() {
-    window.showOpenFilePicker({ multiple: false }).then(function (handles) {
+    var generation = live.generation;
+    return window.showOpenFilePicker({ multiple: false }).then(function (handles) {
+      if (generation !== live.generation) return;
       stopLive();
       live.handle = handles[0];
       poll();
@@ -382,7 +415,7 @@
       html += "</div>";
     }
     html += "</div><h2>headers</h2>";
-    var groups = {}, order = [];
+    var groups = Object.create(null), order = [];
     hdrs.forEach(function (h) {
       if (!groups[h.name]) { groups[h.name] = []; order.push(h.name); }
       groups[h.name].push(h);
@@ -436,7 +469,7 @@
   function buildSql(expr) {
     var wheres = [], params = [], joins = [], hn = 0;
     tokenize(expr).forEach(function (tok) {
-      tok = tok.replace(/^"|"$/g, "");
+      if (tok.startsWith('"') && tok.endsWith('"')) tok = tok.slice(1, -1);
       var m;
       if ((m = tok.match(/^kind=(request|response|note|raw)$/))) { wheres.push("r.kind = ?"); params.push(m[1]); return; }
       if ((m = tok.match(/^status=(\d[\d,]*)$/))) {
@@ -465,7 +498,9 @@
       }
       m = tok.match(/^body[~:](.+)$/);
       wheres.push("r.body LIKE ?");
-      params.push("%" + (m ? m[1] : tok) + "%");
+      var term = m ? m[1] : tok;
+      if (term.startsWith('"') && term.endsWith('"')) term = term.slice(1, -1);
+      params.push("%" + term + "%");
     });
     return {
       sql: "SELECT DISTINCT r.id, r.kind, r.status, r.method, r.path, r.ts, substr(r.body, 1, 160) AS preview FROM records r " +
@@ -479,9 +514,9 @@
     var built = buildSql(expr || "");
     var list = $("list"), result;
     try { result = rows(built.sql, built.params); }
-    catch (e) { list.innerHTML = '<div class="err-box">' + esc(e.message) + "</div>"; $("count").textContent = ""; return; }
+    catch (e) { list.innerHTML = '<div class="err-box">' + esc(e.message) + "</div>"; $("count").textContent = ""; return false; }
     $("count").textContent = result.length + (result.length === 500 ? "+" : "");
-    if (!result.length) { list.innerHTML = '<div class="empty">(no matches)</div>'; return; }
+    if (!result.length) { list.innerHTML = '<div class="empty">(no matches)</div>'; return true; }
     list.innerHTML = result.map(function (r) {
       return '<div class="row' + (selected === r.id ? " sel" : "") + '" data-id="' + r.id + '">' +
         '<span class="id">' + r.id + "</span>" +
@@ -489,6 +524,7 @@
         '<span class="preview">' + esc((r.preview || "").replace(/\s+/g, " ")) + "</span>" +
         '<span class="ts">' + tsShort(r.ts) + "</span></div>";
     }).join("");
+    return true;
   }
   var timer = null;
   $("q").addEventListener("input", function () {

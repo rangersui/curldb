@@ -2,7 +2,7 @@
 
 HTTP exchange datastore. One SQLite file per session; the requests and responses of an AI conversation stored as-is, queried by envelope fields.
 
-curl is the reference client, hence the name: every operation the server accepts is one curl line, and the stored record is byte for byte what curl sent.
+curl is the reference client, hence the name: every operation the server accepts is one curl line, and the stored record is the text of what curl sent: start line, headers, body.
 
 [中文说明在后面](#中文)
 
@@ -104,12 +104,16 @@ curldb query 'header:tags=iot'
 
 ```
 POST /<anything>     stored as received (request line, all headers, body), 201 + Location: /<id>
+POST /  + Content-Type: message/http
+                     the body is the record: a response or a request stored as itself, no outer envelope
 GET  /<id>           the whole stored message, Content-Type: message/http
-HEAD /<id>           standard HEAD
+HEAD /<id>           the headers alone
 GET  /?q=<expr>      same as curldb query
 GET  /tags[/<name>]  same as curldb tags
 GET  /stats          same as curldb stats
 ```
+
+The headers of `GET /<id>` describe the stored message, the body is the message: `X-Id`, `X-Kind`, `X-Status` or `X-Method`, `X-Path`, `Last-Modified` (when it was stored), `X-Last` (the tail), and `Link` with `rel="prev"` and `rel="next"`. `HEAD /<id>` is one line of `curldb ls` in header form.
 
 `GET /` and `HEAD /` answer with `X-Last: <highest id>`. Ids are never reused, so that number is both the record count and the tail of the log; a consumer polls `HEAD /` and reads `/<n>` from where it left off.
 
@@ -124,7 +128,9 @@ curl 'localhost:200/?q=status=409'
 
 The default port is 200. Ports below 1024 need root on Linux/macOS; `curldb serve 8200` avoids sudo.
 
-An AI can curl straight in. A Codex review sent as `PUT /review` is stored as that PUT request with the review in the body; to store it as a response, use `curldb add` from the CLI.
+An AI can curl straight in. A reply that already is an HTTP message (a Codex review starting with `HTTP/1.1 409 Conflict`, or a message read back from another curldb) is stored as itself by sending it with `Content-Type: message/http`; that is `curldb add` over the wire. The same message sent as an ordinary POST body would be stored one envelope deeper, as that POST.
+
+Records are UTF-8 text. A `message/http` body is stored as sent, line endings included. An ordinary POST or PUT is rebuilt from the parsed request with LF line endings, and any bytes outside UTF-8 become U+FFFD.
 
 Bound to localhost, no token. The trust model is the CLI's: whoever can run curl on this machine.
 
@@ -240,7 +246,7 @@ GitHub Actions runs the tests on Windows and Linux with Python 3.10 and 3.14, pl
 
 HTTP exchange 原生存储。一个 session 一个 SQLite 文件,AI 对话里的 request 和 response 原样存,按信封字段查。
 
-curl 是参考客户端,名字由此而来:server 接受的每个操作都是一行 curl,存下来的记录就是 curl 发出去的那条消息,一个字节不差。
+curl 是参考客户端,名字由此而来:server 接受的每个操作都是一行 curl,存下来的记录就是 curl 发出去的那段文本:请求行、header、body。
 
 ## 干嘛的
 
@@ -340,12 +346,16 @@ curldb query 'header:tags=iot'
 
 ```
 POST /<anything>     收到什么存什么(请求行、所有 header、body),201 + Location: /<id>
+POST /  + Content-Type: message/http
+                     body 本身就是记录:一条 response 或 request 按它本来的样子存,不套外层
 GET  /<id>           整条存的消息,Content-Type: message/http
-HEAD /<id>           标准 HEAD
+HEAD /<id>           只要 header
 GET  /?q=<expr>      同 curldb query
 GET  /tags[/<name>]  同 curldb tags
 GET  /stats          同 curldb stats
 ```
+
+`GET /<id>` 的 header 描述这条记录,body 是记录本身:`X-Id`、`X-Kind`、`X-Status` 或 `X-Method`、`X-Path`、`Last-Modified`(存入时间)、`X-Last`(尾巴)、`Link` 的 `rel="prev"` 和 `rel="next"`。`HEAD /<id>` 就是 `curldb ls` 里的一行,换成 header 的样子。
 
 `GET /` 和 `HEAD /` 带 `X-Last: <最大编号>`。编号不复用,所以这个数既是记录总数也是日志的尾巴;消费者 `HEAD /` 看尾巴动没动,从自己记住的位置往后 `GET /<n>`。
 
@@ -360,7 +370,9 @@ curl 'localhost:200/?q=status=409'
 
 端口默认 200。1024 以下在 Linux/macOS 要 root,不想 sudo 就 `curldb serve 8200`。
 
-AI 可以直接 curl 进来。Codex 的 review 以 `PUT /review` 发过来,存的是这个 PUT 请求,review 原文在 body 里;要把它当一条 response 存,走 CLI 的 `curldb add`。
+AI 可以直接 curl 进来。本身已经是 HTTP 消息的东西(以 `HTTP/1.1 409 Conflict` 开头的 Codex review,或者从另一个 curldb 读出来的一条消息)带上 `Content-Type: message/http` 发过来,就按它本来的样子存,这是 HTTP 版的 `curldb add`。同一条消息当普通 POST body 发,会多套一层,存的是那个 POST。
+
+记录是 UTF-8 文本。`message/http` 的 body 照发来的样子存,换行也保留。普通 POST/PUT 从解析后的请求重建,换行用 LF,UTF-8 以外的字节变成 U+FFFD。
 
 只绑 localhost,没有 token:信任模型和 CLI 一样,能在这台机器上跑 curl 的人。
 

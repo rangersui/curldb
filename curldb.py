@@ -18,6 +18,7 @@ import re
 import sqlite3
 import sys
 import time
+from email.utils import formatdate
 from http import HTTPStatus
 
 __version__ = "0.1.0"
@@ -332,10 +333,19 @@ def add(raw: str, conn: sqlite3.Connection | None = None,
 
 
 def get(rid: int) -> str | None:
+    row = get_row(rid)
+    return row["raw"] if row else None
+
+
+def get_row(rid: int) -> dict | None:
+    """One record with its index fields: id, kind, status, method, path, ts, raw."""
     conn = _connect()
-    row = conn.execute("SELECT raw FROM records WHERE id=?", (rid,)).fetchone()
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT id, kind, status, method, path, ts, raw FROM records WHERE id=?",
+        (rid,)).fetchone()
     conn.close()
-    return row[0] if row else None
+    return dict(row) if row else None
 
 # -----------------------------------------------
 # QUERY
@@ -545,6 +555,13 @@ def _utf8_from_latin1(text: str) -> str:
         return text
 
 
+def _latin1_from_utf8(text: str) -> str:
+    # The inverse, for headers we send: http.server encodes header lines as
+    # latin-1, so hand it the UTF-8 bytes disguised as latin-1 and the wire
+    # carries the same UTF-8 the stored envelope has.
+    return text.encode("utf-8").decode("latin-1")
+
+
 def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -569,14 +586,34 @@ def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
             if not rid.isdigit():
                 self._text(404, "not found\n", head_only=head_only)
                 return
-            raw = get(int(rid))
-            if raw is None:
+            row = get_row(int(rid))
+            if row is None:
                 self._text(404, "not found\n", head_only=head_only)
                 return
-            data = raw.encode("utf-8")
+            data = row["raw"].encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "message/http")
             self.send_header("Content-Length", str(len(data)))
+            # The outer headers describe the stored message; the body is
+            # the message itself. Same fields as one line of `curldb ls`.
+            self.send_header("X-Id", str(row["id"]))
+            self.send_header("X-Kind", row["kind"])
+            if row["status"] is not None:
+                self.send_header("X-Status", str(row["status"]))
+            if row["method"]:
+                self.send_header("X-Method", _latin1_from_utf8(row["method"]))
+            if row["path"]:
+                self.send_header("X-Path", _latin1_from_utf8(row["path"]))
+            self.send_header("Last-Modified", formatdate(row["ts"], usegmt=True))
+            last = last_id()
+            self.send_header("X-Last", str(last))
+            links = []
+            if row["id"] > 1:
+                links.append(f'</{row["id"] - 1}>; rel="prev"')
+            if row["id"] < last:
+                links.append(f'</{row["id"] + 1}>; rel="next"')
+            if links:
+                self.send_header("Link", ", ".join(links))
             self.end_headers()
             if not head_only:
                 self.wfile.write(data)
@@ -607,6 +644,19 @@ def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
         def _store(self) -> None:
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length).decode("utf-8", "replace")
+            # message/http says the body IS an HTTP message. Store the body
+            # itself and drop this request's envelope, so a response (or a
+            # request) can be archived as what it is, not wrapped in a POST.
+            # This is the HTTP twin of `curldb add`.
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype == "message/http":
+                kind = parse_envelope(body)["kind"]
+                if kind not in ("request", "response"):
+                    self._text(400, "message/http body must start with a status line or a request line" + chr(10))
+                    return
+                rid = add(body)
+                self._text(201, f"#{rid}" + chr(10), {"Location": f"/{rid}"})
+                return
             # http.server decodes the request line and headers as
             # latin-1; re-encode to recover the UTF-8 bytes the client
             # actually sent, otherwise non-ASCII names, values and paths
@@ -733,7 +783,11 @@ curldb -- HTTP exchange datastore (one sqlite file per session)
   stats                db stats
   serve [port]         HTTP door on 127.0.0.1 (default 200; root below 1024 on unix):
                        POST/PUT anything -> stored as received, 201 + Location
-                       GET /<id> -> the stored message (message/http)
+                       POST with Content-Type: message/http -> the body is the
+                       record (a response or request stored as itself)
+                       GET /<id> -> the stored message (message/http); X-Id, X-Kind,
+                       X-Status, X-Method, X-Path, Last-Modified, X-Last, Link prev/next
+                       describe it, so HEAD /<id> is one line of ls
                        GET /?q=<expr>, GET /tags[/<name>], GET /stats -> same as the CLI
                        GET / and HEAD / carry X-Last: <highest id> (the log tail)
 

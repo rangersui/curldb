@@ -296,6 +296,54 @@ class HTTPTests(TemporaryDatabase):
                 self.assertEqual(headers["Content-Type"], head_headers["Content-Type"])
         self.assertIn(b"design(1)", self.request("GET", "/tags/X-Scope")[2])
 
+    def test_message_http_body_is_stored_as_itself(self):
+        body = RAW.encode("utf-8")
+        status, headers, _ = self.request("POST", "/anything", body, {"Content-Type": "message/http"})
+        self.assertEqual(status, 201)
+        status, _, stored = self.request("GET", headers["Location"])
+        self.assertEqual(status, 200)
+        self.assertEqual(stored, body)
+        rid = int(headers["Location"].lstrip("/"))
+        row = curldb.query(f"kind=response status=409")[0]
+        self.assertEqual(row["id"], rid)
+        status, _, data = self.request("POST", "/", b"just prose", {"Content-Type": "message/http; charset=utf-8"})
+        self.assertEqual(status, 400)
+        self.assertIn(b"message/http body", data)
+        self.assertEqual(curldb.stats()["count"], 1)
+
+    def test_record_headers_describe_the_stored_message(self):
+        first = curldb.add(RAW)
+        second = curldb.add("GET /notes/scope HTTP/1.1\r\nX-Scope: design\r\n\r\n")
+        status, headers, body = self.request("GET", f"/{first}")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "message/http")
+        self.assertEqual(body, RAW.encode("utf-8"))
+        self.assertEqual(headers["X-Id"], str(first))
+        self.assertEqual(headers["X-Kind"], "response")
+        self.assertEqual(headers["X-Status"], "409")
+        self.assertNotIn("X-Method", headers)
+        self.assertEqual(headers["X-Last"], str(second))
+        self.assertEqual(headers["Link"], f'</{second}>; rel="next"')
+        self.assertTrue(headers["Last-Modified"].endswith(" GMT"))
+        status, headers, _ = self.request("HEAD", f"/{second}")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["X-Kind"], "request")
+        self.assertEqual(headers["X-Method"], "GET")
+        self.assertEqual(headers["X-Path"], "/notes/scope")
+        self.assertNotIn("X-Status", headers)
+        self.assertEqual(headers["Link"], f'</{first}>; rel="prev"')
+
+    def test_non_ascii_path_in_x_path_header(self):
+        # X-Path carries the stored path as UTF-8 bytes; http.client hands
+        # them back decoded as latin-1, the same way http.server received them.
+        path = "/notes/\u4e2d\u6587.md"
+        rid = curldb.add(f"GET {path} HTTP/1.1\r\n\r\n")
+        for verb in ("GET", "HEAD"):
+            with self.subTest(verb=verb):
+                status, headers, _ = self.request(verb, f"/{rid}")
+                self.assertEqual(status, 200)
+                self.assertEqual(headers["X-Path"].encode("latin-1").decode("utf-8"), path)
+
     def test_last_id_header_and_stats(self):
         status, headers, _ = self.request("HEAD", "/")
         self.assertEqual((status, headers["X-Last"]), (200, "0"))
