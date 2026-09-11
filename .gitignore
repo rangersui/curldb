@@ -1,0 +1,11 @@
+# session databases
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# mqtt side log from the adapter
+mqtt.log
+
+# python
+__pycache__/
+*.pyc
