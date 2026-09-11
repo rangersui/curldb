@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""httpdb -- HTTP exchange datastore.
+"""curldb -- HTTP exchange datastore.
 
 Raw HTTP requests and responses in, structured queries out.
 One SQLite file per session, zero daemon, zero conversion.
 
-    echo 'HTTP/1.1 200 OK\nX-Verdict: solid\n\nhello' | httpdb add
-    echo 'what about fork?' | httpdb wrap 'POST /chat' -H X-Topic:fork | httpdb add
-    httpdb query 'status=200 header:X-Verdict=solid body~hello'
-    httpdb tags
-    httpdb get 1
-    httpdb ls
+    echo 'HTTP/1.1 200 OK\nX-Verdict: solid\n\nhello' | curldb add
+    echo 'what about fork?' | curldb wrap 'POST /chat' -H X-Topic:fork | curldb add
+    curldb query 'status=200 header:X-Verdict=solid body~hello'
+    curldb tags
+    curldb get 1
+    curldb ls
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from http import HTTPStatus
 
 __version__ = "0.1.0"
 
-DEFAULT_DB = "httpdb.sqlite"
+DEFAULT_DB = "curldb.sqlite"
 
 # -----------------------------------------------
 # PARSE
@@ -213,7 +213,7 @@ def wrap(start: str, body: str, headers: list[tuple[str, str]]) -> str:
 
 
 def db_path() -> str:
-    return os.environ.get("HTTPDB_PATH", DEFAULT_DB)
+    return os.environ.get("CURLDB_PATH", DEFAULT_DB)
 
 
 def _connect(path: str | None = None) -> sqlite3.Connection:
@@ -540,7 +540,7 @@ def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = f"httpdb/{__version__}"
+        server_version = f"curldb/{__version__}"
         sys_version = ""
 
         def _text(self, code: int, text: str, extra: dict | None = None,
@@ -617,10 +617,10 @@ def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
     try:
         httpd = HTTPServer((host, port), Handler)
     except PermissionError:
-        _die(f"port {port} needs root on this OS; try: httpdb serve 8200")
+        _die(f"port {port} needs root on this OS; try: curldb serve 8200")
     except OSError as exc:
         _die(f"cannot bind {host}:{port}: {exc}")
-    sys.stderr.write(f"httpdb {__version__} on http://{host}:{port}/  db={db_path()}\n")
+    sys.stderr.write(f"curldb {__version__} on http://{host}:{port}/  db={db_path()}\n")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -696,7 +696,7 @@ def _write_raw(text: str) -> None:
 
 
 HELP = """\
-httpdb -- HTTP exchange datastore (one sqlite file per session)
+curldb -- HTTP exchange datastore (one sqlite file per session)
 
   add [file]           store a raw HTTP request/response, or a markdown
                        file with --- front matter (stdin or file)
@@ -719,7 +719,7 @@ query DSL (tokens AND'd together):
   header:X-Verdict   header:X-Verdict=solid
   body~word   body~"a phrase"   anyword
 
-db: --db PATH, or HTTPDB_PATH, else ./httpdb.sqlite
+db: --db PATH, or CURLDB_PATH, else ./curldb.sqlite
 """
 
 
@@ -738,7 +738,7 @@ def cli(argv: list[str] | None = None) -> None:
         i = args.index("--db")
         if i + 1 >= len(args):
             _die("--db needs a path")
-        os.environ["HTTPDB_PATH"] = args[i + 1]
+        os.environ["CURLDB_PATH"] = args[i + 1]
         del args[i:i + 2]
 
     if not args or args[0] in ("-h", "--help", "help"):

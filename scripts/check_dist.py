@@ -37,7 +37,7 @@ def main() -> None:
         license_path = metadata_path.rsplit("/", 1)[0] + "/licenses/LICENSE"
         require(license_path in names, "Wheel is missing LICENSE")
         version = metadata["Version"]
-        tree = ast.parse(wheel.read("httpdb.py").decode("utf-8"))
+        tree = ast.parse(wheel.read("curldb.py").decode("utf-8"))
         code_version = next(
             ast.literal_eval(node.value) for node in tree.body
             if isinstance(node, ast.Assign)
@@ -47,24 +47,24 @@ def main() -> None:
 
     with tarfile.open(sources[0]) as source:
         prefix = f"curldb-{version}/"
-        required = {"SYSTEM.md", "LICENSE", "README.md", "pyproject.toml", "httpdb.py",
-                    "MANIFEST.in", "tests/test_httpdb.py", "scripts/check_dist.py"}
+        required = {"SYSTEM.md", "LICENSE", "README.md", "pyproject.toml", "curldb.py",
+                    "MANIFEST.in", "tests/test_curldb.py", "scripts/check_dist.py"}
         missing = {prefix + name for name in required} - set(source.getnames())
         require(not missing, f"Source distribution is missing: {sorted(missing)}")
         source_metadata = message_from_bytes(source.extractfile(prefix + "PKG-INFO").read())
         require(source_metadata["Version"] == version, "Wheel and sdist versions disagree")
 
-    with tempfile.TemporaryDirectory(prefix="httpdb-package-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="curldb-package-") as temporary:
         directory = Path(temporary)
         environment = directory / "venv"
         venv.EnvBuilder(with_pip=True).create(environment)
         scripts = environment / ("Scripts" if os.name == "nt" else "bin")
         python = scripts / ("python.exe" if os.name == "nt" else "python")
-        executable = scripts / ("httpdb.exe" if os.name == "nt" else "httpdb")
+        executable = scripts / ("curldb.exe" if os.name == "nt" else "curldb")
         env = os.environ.copy()
         env.pop("PYTHONPATH", None)
         env.pop("PYTHONHOME", None)
-        env["HTTPDB_PATH"] = str(directory / "session.sqlite")
+        env["CURLDB_PATH"] = str(directory / "session.sqlite")
 
         def run(*args, data=None):
             return subprocess.run(
@@ -84,7 +84,7 @@ def main() -> None:
             require(run(executable, "get", rid) == wrapped, "Installed add/get changed raw data")
         matches = run(executable, "query", "kind=request header:X-Scope=packaging body~中文")
         require(matches.count(b"POST /check") == 2, "Installed query failed")
-    print(f"OK: httpdb {version}; sdist contents, metadata, isolated wheel install and CLI roundtrips")
+    print(f"OK: curldb {version}; sdist contents, metadata, isolated wheel install and CLI roundtrips")
 
 
 if __name__ == "__main__":

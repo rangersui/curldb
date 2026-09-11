@@ -25,10 +25,10 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Repository = "https://github.com/rangersui/httpdb"
+Repository = "https://github.com/rangersui/curldb"
 
 [project.scripts]
-httpdb = "httpdb:cli"
+curldb = "curldb:cli"
 
 [tool.setuptools]
-py-modules = ["httpdb"]
+py-modules = ["curldb"]

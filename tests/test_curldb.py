@@ -15,10 +15,10 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import urlencode
 
-import httpdb
+import curldb
 
 
-SCRIPT = Path(httpdb.__file__).resolve()
+SCRIPT = Path(curldb.__file__).resolve()
 RAW = "HTTP/1.1 409 Conflict\r\nX-Scope: design\r\n\r\n  协议设计\r\n尾行  \r\n"
 NOTE = """---
 title: 'A note'
@@ -38,7 +38,7 @@ desc: |
 
 class EnvelopeTests(unittest.TestCase):
     def test_response_keeps_duplicate_headers_and_ignores_malformed_lines(self):
-        parsed = httpdb.parse_envelope(
+        parsed = curldb.parse_envelope(
             "HTTP/1.1 409 Conflict\r\nX-Tag: a\r\nmalformed\r\nX-Tag: b\r\n\r\nhello"
         )
         self.assertEqual((parsed["kind"], parsed["status"]), ("response", 409))
@@ -46,13 +46,13 @@ class EnvelopeTests(unittest.TestCase):
         self.assertEqual(parsed["body"], "hello")
 
     def test_http_path_comes_from_envelope(self):
-        request = httpdb.parse_envelope("POST /chat?q=1 HTTP/1.1\n\nhello", "file.txt")
+        request = curldb.parse_envelope("POST /chat?q=1 HTTP/1.1\n\nhello", "file.txt")
         self.assertEqual((request["kind"], request["method"], request["path"]),
                          ("request", "POST", "/chat?q=1"))
-        self.assertIsNone(httpdb.parse_envelope(RAW, "file.txt")["path"])
+        self.assertIsNone(curldb.parse_envelope(RAW, "file.txt")["path"])
 
     def test_front_matter_flattens_lists_nested_keys_and_blocks(self):
-        parsed = httpdb.parse_envelope(NOTE, "vault\\note.md")
+        parsed = curldb.parse_envelope(NOTE, "vault\\note.md")
         self.assertEqual((parsed["kind"], parsed["path"]), ("note", "vault/note.md"))
         self.assertEqual(parsed["headers"], [
             ("title", "A note"), ("tags", "rust"), ("tags", "iot"),
@@ -64,7 +64,7 @@ class EnvelopeTests(unittest.TestCase):
     def test_plain_text_and_unclosed_front_matter_remain_searchable(self):
         for text in ("first paragraph\n\nsecond paragraph", "---\ntitle: unfinished"):
             with self.subTest(text=text):
-                parsed = httpdb.parse_envelope(text, "note.txt")
+                parsed = curldb.parse_envelope(text, "note.txt")
                 self.assertEqual(parsed["kind"], "raw")
                 self.assertEqual(parsed["path"], "note.txt")
                 self.assertEqual(parsed["body"], text)
@@ -74,42 +74,42 @@ class EnvelopeTests(unittest.TestCase):
         for start, first in (("200", "HTTP/1.1 200 OK"),
                              ("POST /chat", "POST /chat HTTP/1.1")):
             with self.subTest(start=start):
-                wrapped = httpdb.wrap(start, body, [("date", "fixed"), ("X-Tag", "a")])
+                wrapped = curldb.wrap(start, body, [("date", "fixed"), ("X-Tag", "a")])
                 head, actual_body = wrapped.split("\n\n", 1)
                 self.assertEqual(head.splitlines(), [first, "date: fixed", "X-Tag: a"])
                 self.assertEqual(actual_body, body)
-        self.assertIn("\nDate: ", httpdb.wrap("200", body, []))
+        self.assertIn("\nDate: ", curldb.wrap("200", body, []))
 
 
 class TemporaryDatabase(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="httpdb-test-")
+        temporary = tempfile.TemporaryDirectory(prefix="curldb-test-")
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
         self.db = self.directory / "session.sqlite"
-        environment = patch.dict(os.environ, {"HTTPDB_PATH": str(self.db)})
+        environment = patch.dict(os.environ, {"CURLDB_PATH": str(self.db)})
         environment.start()
         self.addCleanup(environment.stop)
 
 
 class DatabaseTests(TemporaryDatabase):
     def test_raw_roundtrip_and_timestamp(self):
-        rid = httpdb.add(RAW, ts=123.0)
-        self.assertEqual(httpdb.get(rid), RAW)
-        self.assertEqual(httpdb.ls()[0]["ts"], 123.0)
-        self.assertIsNone(httpdb.get(rid + 1))
+        rid = curldb.add(RAW, ts=123.0)
+        self.assertEqual(curldb.get(rid), RAW)
+        self.assertEqual(curldb.ls()[0]["ts"], 123.0)
+        self.assertIsNone(curldb.get(rid + 1))
 
     def test_combined_query_uses_and_and_deduplicates_records(self):
-        rid = httpdb.add("HTTP/1.1 409 Conflict\nX-Tag: a\nX-Tag: a\n\ntimeout")
-        httpdb.add("HTTP/1.1 200 OK\nX-Tag: a\n\ntimeout")
-        httpdb.add("HTTP/1.1 409 Conflict\nX-Tag: b\n\ntimeout")
-        matches = httpdb.query("kind=response status=409,500 header:x-tag=a body~timeout")
+        rid = curldb.add("HTTP/1.1 409 Conflict\nX-Tag: a\nX-Tag: a\n\ntimeout")
+        curldb.add("HTTP/1.1 200 OK\nX-Tag: a\n\ntimeout")
+        curldb.add("HTTP/1.1 409 Conflict\nX-Tag: b\n\ntimeout")
+        matches = curldb.query("kind=response status=409,500 header:x-tag=a body~timeout")
         self.assertEqual([r["id"] for r in matches], [rid])
-        self.assertEqual(httpdb.query("status=409 header:X-Tag=a body~missing"), [])
+        self.assertEqual(curldb.query("status=409 header:X-Tag=a body~missing"), [])
 
     def test_requests_and_notes_share_header_queries(self):
-        request = httpdb.add(httpdb.wrap("POST /tool/Read", "read a note", [("X-Tool", "Read")]))
-        note = httpdb.add(NOTE, source_path="vault/note.md")
+        request = curldb.add(curldb.wrap("POST /tool/Read", "read a note", [("X-Tool", "Read")]))
+        note = curldb.add(NOTE, source_path="vault/note.md")
         queries = {
             "kind=request method=post path=/tool/Read header:X-Tool": request,
             "path~/tool/ header:X-Tool=Read": request,
@@ -118,16 +118,16 @@ class DatabaseTests(TemporaryDatabase):
         }
         for expr, rid in queries.items():
             with self.subTest(expr=expr):
-                self.assertEqual([r["id"] for r in httpdb.query(expr)], [rid])
-        self.assertEqual(httpdb.tags("tags"), {"tags": [("iot", 1), ("rust", 1)]})
-        self.assertIn(("metadata.type", "feedback"), httpdb.headers_of(note))
+                self.assertEqual([r["id"] for r in curldb.query(expr)], [rid])
+        self.assertEqual(curldb.tags("tags"), {"tags": [("iot", 1), ("rust", 1)]})
+        self.assertIn(("metadata.type", "feedback"), curldb.headers_of(note))
 
     def test_cjk_short_terms_and_english_phrases(self):
-        rid = httpdb.add("协议设计支持中文搜索\n\nexact phrase and timeout")
-        httpdb.add("unrelated text")
+        rid = curldb.add("协议设计支持中文搜索\n\nexact phrase and timeout")
+        curldb.add("unrelated text")
         for expr in ("body~协议", "body~协议设计", 'body~"exact phrase"', "timeout"):
             with self.subTest(expr=expr):
-                self.assertEqual([r["id"] for r in httpdb.query(expr)], [rid])
+                self.assertEqual([r["id"] for r in curldb.query(expr)], [rid])
 
     def test_unicode61_fallback_searches_cjk(self):
         connect = sqlite3.connect
@@ -138,11 +138,11 @@ class DatabaseTests(TemporaryDatabase):
                     raise sqlite3.OperationalError("no such tokenizer: trigram")
                 return super().execute(sql, *args, **kwargs)
 
-        with patch("httpdb.sqlite3.connect", side_effect=lambda path: connect(path, factory=WithoutTrigram)):
-            rid = httpdb.add("协议设计 supports exact phrase")
-            self.assertFalse(httpdb.stats()["trigram"])
+        with patch("curldb.sqlite3.connect", side_effect=lambda path: connect(path, factory=WithoutTrigram)):
+            rid = curldb.add("协议设计 supports exact phrase")
+            self.assertFalse(curldb.stats()["trigram"])
             for expr in ("body~协议设计", 'body~"exact phrase"'):
-                self.assertEqual([r["id"] for r in httpdb.query(expr)], [rid])
+                self.assertEqual([r["id"] for r in curldb.query(expr)], [rid])
 
     def test_legacy_layout_migrates_raw_and_timestamps(self):
         conn = sqlite3.connect(self.db)
@@ -155,17 +155,17 @@ class DatabaseTests(TemporaryDatabase):
             conn.commit()
         finally:
             conn.close()
-        self.assertEqual(httpdb.get(1), RAW)
-        self.assertEqual(httpdb.query("status=409 header:X-Scope=design")[0]["ts"], 123.0)
-        self.assertEqual(httpdb.stats()["count"], 1)
+        self.assertEqual(curldb.get(1), RAW)
+        self.assertEqual(curldb.query("status=409 header:X-Scope=design")[0]["ts"], 123.0)
+        self.assertEqual(curldb.stats()["count"], 1)
 
     def test_limit_and_separate_session_files(self):
-        first = httpdb.add("first")
-        second = httpdb.add("second")
-        self.assertEqual([r["id"] for r in httpdb.ls(1)], [second])
-        with patch.dict(os.environ, {"HTTPDB_PATH": str(self.directory / "other.sqlite")}):
-            self.assertEqual(httpdb.ls(), [])
-        self.assertEqual(httpdb.get(first), "first")
+        first = curldb.add("first")
+        second = curldb.add("second")
+        self.assertEqual([r["id"] for r in curldb.ls(1)], [second])
+        with patch.dict(os.environ, {"CURLDB_PATH": str(self.directory / "other.sqlite")}):
+            self.assertEqual(curldb.ls(), [])
+        self.assertEqual(curldb.get(first), "first")
 
 
 class CLITests(TemporaryDatabase):
@@ -231,7 +231,7 @@ class HTTPTests(TemporaryDatabase):
             ready.put(server)
             return server
 
-        self.thread = threading.Thread(target=httpdb.serve, args=(0,), daemon=True)
+        self.thread = threading.Thread(target=curldb.serve, args=(0,), daemon=True)
         with patch("http.server.HTTPServer", side_effect=create_server):
             self.thread.start()
             self.server = ready.get(timeout=5)
@@ -263,8 +263,8 @@ class HTTPTests(TemporaryDatabase):
                 self.assertEqual(int(headers["Content-Length"]), len(stored))
                 self.assertTrue(stored.startswith(f"{method} /review HTTP/1.1\n".encode()))
                 self.assertEqual(stored.split(b"\n\n", 1)[1], body)
-        self.assertEqual(httpdb.stats()["count"], 4)
-        self.assertEqual(httpdb.query("kind=response"), [])
+        self.assertEqual(curldb.stats()["count"], 4)
+        self.assertEqual(curldb.query("kind=response"), [])
 
     def test_non_ascii_header_values_are_stored_as_utf8(self):
         # http.server hands header values to us decoded as latin-1; the
@@ -278,10 +278,10 @@ class HTTPTests(TemporaryDatabase):
         text = stored.decode("utf-8")
         self.assertIn(f"X-Topic: {topic}\n", text)
         self.assertTrue(text.endswith("中文 body"))
-        self.assertEqual(httpdb.query(f"header:X-Topic={topic}")[0]["path"], "/chat")
+        self.assertEqual(curldb.query(f"header:X-Topic={topic}")[0]["path"], "/chat")
 
     def test_query_tags_and_head(self):
-        rid = httpdb.add(RAW)
+        rid = curldb.add(RAW)
         path = "/?" + urlencode({"q": "status=409 header:X-Scope=design body~协议"})
         status, _, data = self.request("GET", path)
         self.assertEqual(status, 200)

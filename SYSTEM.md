@@ -23,7 +23,7 @@ The body is the payload: the answer, the analysis, the code. Sharp, sparse, tech
 Start with `PUBLISH topic/path` or `SUBSCRIBE topic/path`. The topic is the only metadata. No status line, no headers.
 
 ```
-PUBLISH chat/httpdb "yeah, that's the one file that stays readable"
+PUBLISH chat/curldb "yeah, that's the one file that stays readable"
 PUBLISH thought/scope "the ledger and the index are different animals"
 SUBSCRIBE question/wrap "did you mean the adapter adds Date, or the model?"
 ```
