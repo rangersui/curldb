@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en" data-lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>curldb</title>
+<meta name="description" content="curldb stores HTTP messages verbatim. One SQLite file per session, zero daemon, zero dependencies. curl is all you need.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Noto+Serif+SC:wght@400;600&display=swap">
+<script>
+  (function () {
+    var saved = null;
+    try { saved = localStorage.getItem("curldb-lang"); } catch (e) {}
+    var lang = saved || ((navigator.language || "").toLowerCase().indexOf("zh") === 0 ? "zh" : "en");
+    document.documentElement.setAttribute("data-lang", lang);
+    document.documentElement.setAttribute("lang", lang === "zh" ? "zh-CN" : "en");
+  })();
+</script>
+<style>
+  :root {
+    --paper: #FFFFFF;
+    --ink: #1B1D22;
+    --muted: #6B6E76;
+    --rule: #D9DAD6;
+    --ok: #1F7A4D;
+    --code-bg: #F3F4F1;
+    --serif: "Newsreader", "Noto Serif SC", "Source Han Serif SC", "Songti SC", "SimSun", Georgia, "Times New Roman", serif;
+    --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #14161A;
+      --ink: #E8E6E1;
+      --muted: #9A9DA5;
+      --rule: #2A2D33;
+      --ok: #62C08F;
+      --code-bg: #1C1F24;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #14161A;
+    --ink: #E8E6E1;
+    --muted: #9A9DA5;
+    --rule: #2A2D33;
+    --ok: #62C08F;
+    --code-bg: #1C1F24;
+  }
+
+  * { box-sizing: border-box; }
+  html { background: var(--paper); }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 1.125rem;
+    line-height: 1.6;
+    font-optical-sizing: auto;
+  }
+  a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: 0.18em; }
+  a:hover { color: var(--ok); }
+  :focus-visible { outline: 2px solid var(--ok); outline-offset: 3px; }
+
+  [data-lang="en"] [data-lang="zh"] { display: none; }
+  [data-lang="zh"] [data-lang="en"] { display: none; }
+  [data-lang="zh"] body { line-height: 1.85; }
+
+  .page {
+    max-width: 66ch;
+    margin: 0 auto;
+    padding: 2.5rem 1.5rem 5rem;
+  }
+
+  header.top {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    margin-bottom: 4rem;
+  }
+  .brand {
+    font-family: var(--mono);
+    font-size: 0.95rem;
+    letter-spacing: 0.02em;
+  }
+  .lang {
+    display: flex;
+    gap: 0.25rem;
+    font-size: 0.9rem;
+  }
+  .lang button {
+    font: inherit;
+    font-family: var(--serif);
+    background: none;
+    border: 0;
+    border-bottom: 1px solid transparent;
+    color: var(--muted);
+    padding: 0 0.2rem;
+    cursor: pointer;
+  }
+  .lang button[aria-pressed="true"] {
+    color: var(--ink);
+    border-bottom-color: var(--ink);
+  }
+  .lang span { color: var(--rule); }
+
+  /* The hero is an HTTP response, set in serif. */
+  .response {
+    margin: 0 0 4.5rem;
+  }
+  .response .status {
+    font-style: italic;
+    font-weight: 500;
+    font-size: clamp(2rem, 6vw, 3.25rem);
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    margin: 0 0 1.25rem;
+    text-wrap: balance;
+  }
+  .response .status .code { color: var(--ok); font-style: normal; font-variant-numeric: tabular-nums; }
+  .response .headers {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    font-size: 1.15rem;
+    line-height: 1.5;
+  }
+  .response .headers li { display: flex; gap: 0.6em; flex-wrap: wrap; }
+  .response .headers .name { color: var(--muted); font-style: italic; }
+  .response .headers .name::after { content: ":"; }
+  .response .blank { height: 1.4em; }
+  .response .body {
+    font-size: 1.35rem;
+    line-height: 1.45;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .response .body em { font-style: italic; font-weight: 500; }
+
+  h2 {
+    font-weight: 600;
+    font-size: 1.6rem;
+    line-height: 1.2;
+    letter-spacing: -0.005em;
+    margin: 3.5rem 0 1rem;
+    text-wrap: balance;
+  }
+  p { margin: 0 0 1.1rem; }
+  p.note { color: var(--muted); font-size: 1rem; }
+
+  pre {
+    font-family: var(--mono);
+    font-size: 0.88rem;
+    line-height: 1.55;
+    background: var(--code-bg);
+    border: 1px solid var(--rule);
+    padding: 1.1rem 1.25rem;
+    margin: 1.25rem 0;
+    overflow-x: auto;
+    tab-size: 4;
+  }
+  pre .p { color: var(--muted); }
+  pre .ok { color: var(--ok); }
+
+  /* Terminal demo: typed on first sight, scrolls like a real one. */
+  pre.terminal {
+    max-height: 22rem;
+    overflow-y: auto;
+    overflow-x: hidden;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin-bottom: 0.5rem;
+    scrollbar-width: none;
+  }
+  pre.terminal::-webkit-scrollbar { display: none; }
+  pre.terminal .cmd .p { color: var(--muted); }
+  pre.terminal .cursor {
+    display: inline-block;
+    width: 0.55em;
+    height: 1.05em;
+    background: var(--ink);
+    vertical-align: -0.15em;
+    margin-left: 0.05em;
+    animation: blink 1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  button.replay {
+    font: inherit;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--muted);
+    background: none;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
+  }
+  button.replay:hover { color: var(--ok); }
+  @media (prefers-reduced-motion: reduce) {
+    pre.terminal .cursor { animation: none; }
+  }
+  code {
+    font-family: var(--mono);
+    font-size: 0.9em;
+    background: var(--code-bg);
+    padding: 0.08em 0.35em;
+    border-radius: 2px;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+
+  dl { margin: 1.5rem 0 0; padding: 0; }
+  dl div {
+    display: grid;
+    grid-template-columns: minmax(10ch, 16ch) 1fr;
+    gap: 0 1.5rem;
+    padding: 0.9rem 0;
+    border-top: 1px solid var(--rule);
+  }
+  dl div:last-child { border-bottom: 1px solid var(--rule); }
+  dt { font-weight: 600; margin: 0; }
+  dd { margin: 0; color: var(--ink); }
+  @media (max-width: 30rem) {
+    dl div { grid-template-columns: 1fr; gap: 0.25rem; }
+  }
+
+  .install {
+    margin-top: 3.5rem;
+    padding-top: 2rem;
+    border-top: 1px solid var(--rule);
+  }
+  .install pre { font-size: 1.05rem; }
+  .links { display: flex; flex-wrap: wrap; gap: 1.5rem; font-size: 1rem; margin-top: 1rem; }
+
+  footer {
+    margin-top: 4rem;
+    color: var(--muted);
+    font-size: 0.95rem;
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 1rem;
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header class="top">
+  <div class="brand">curldb</div>
+  <nav class="lang" aria-label="Language">
+    <button type="button" data-set-lang="en" aria-pressed="true">EN</button>
+    <span aria-hidden="true">/</span>
+    <button type="button" data-set-lang="zh" aria-pressed="false">中文</button>
+  </nav>
+</header>
+
+<!-- ============================ EN ============================ -->
+<main data-lang="en">
+
+<section class="response" aria-label="curldb in one HTTP response">
+  <h1 class="status">HTTP/1.1 <span class="code">200</span> OK</h1>
+  <ul class="headers">
+    <li><span class="name">X-Thesis</span><span>curl is all you need</span></li>
+    <li><span class="name">X-Shape</span><span>prose in, headers out</span></li>
+    <li><span class="name">X-Stores</span><span>HTTP messages, verbatim</span></li>
+    <li><span class="name">X-Install</span><span>pip install curldb</span></li>
+    <li><span class="name">Content-Type</span><span>text/plain</span></li>
+  </ul>
+  <div class="blank"></div>
+  <p class="body">Every message an AI sends is already an HTTP message. curldb keeps them: <em>one SQLite file per session, queried by the envelope,</em> zero daemon, zero dependencies.</p>
+</section>
+
+<h2>HTTP is the best control plane</h2>
+<p>A message has three places. A status line for what happened. Headers for what the message is. A body for the payload. Thirty years of software already reads those three places: proxies, caches, logs, rate limiters, your terminal.</p>
+<p>AI APIs put the method in one JSON field, the role in another, the content in a third, and send the whole thing over HTTP. HTTP inside JSON inside HTTP. The moment a header hides inside prose, every tool on the wire goes blind.</p>
+<p>Ask a model to answer as an HTTP response and it does, with headers nobody taught it: <code>X-Verdict</code>, <code>X-Confidence</code>, <code>X-Scope</code>. It learned the shape from the web. The envelope was always there. The API swallowed it; curldb keeps it.</p>
+
+<h2>Prose in, structure out. Not JSON.</h2>
+<p>You ask in plain words. The answer comes back with a status line and headers. That is structure without a schema: no fields you had to define first, no parser to keep in sync. A header like <code>X-Confidence: 0.8</code> already means something to every reader that knows HTTP, models included. Store the message and the headers are the index; nothing had to be extracted.</p>
+<p>HTTP already has a place for the verb, the resource, and the outcome. Putting them inside the payload again gives you the oldest joke on the wire:</p>
+<pre><code><span class="ok">HTTP/1.1 200 OK</span>
+Content-Type: application/json
+
+{"status": 404, "error": "not found"}</code></pre>
+<p>Every proxy, cache, and log on the way saw a success. Only the parser at the far end knows it failed. The status line was right there, unused.</p>
+
+<h2>tee</h2>
+<p>The conversation stays on your screen. <code>tee</code> sends a copy to curldb. Close the terminal; the copy is still there.</p>
+<pre class="terminal" tabindex="0">$ claude 'how do I design a REST API for a todo app?' | tee /dev/tty | curldb add
+HTTP/1.1 200 OK
+X-Scope: design
+X-Confidence: 0.8
+
+Nouns, not verbs. /todos and /todos/42. POST creates, PATCH edits, DELETE removes. Let status codes carry the outcome.
+#1 200 +2 headers
+
+$ claude 'latest news on Rust async?' | tee /dev/tty | curldb add
+HTTP/1.1 200 OK
+X-Scope: news
+X-Confidence: 0.6
+
+Async closures stabilised. The runtime story is unchanged: pick one, stay on it.
+#2 200 +2 headers
+
+$ curldb query 'header:X-Scope=design'
+      1  09-11 11:13   200   Nouns, not verbs. /todos and /todos/42. POST creates
+
+$ curldb tags
+  X-Scope: design(1) news(1)
+  X-Confidence: 0.8(1) 0.6(1)
+</pre>
+<button type="button" class="replay" data-replay hidden><span data-lang="en">replay</span><span data-lang="zh">重放</span></button>
+<p>Each reply prints as usual and lands in curldb with a number. Nothing was parsed on the way in; the headers the model wrote are the index. Query by status, any header, or full text of the body.</p>
+
+<h2>Four rules</h2>
+<dl>
+  <div><dt>One session, one file</dt><dd>The file name is the session. Backup is <code>cp</code>. Searching across sessions is querying each file in turn.</dd></div>
+  <div><dt>Headers are tags</dt><dd>No schema. <code>X-Verdict: shaky</code> is unreadable to a program and obvious to a model, so an unknown header is fine. <code>curldb tags</code> lists what exists; the vocabulary grows out of the data.</dd></div>
+  <div><dt>The body is never touched</dt><dd>Whoever adds headers, you, the model, an annotating model, a hook, adds headers only. Annotators sign with <code>Via:</code>.</dd></div>
+  <div><dt>The server is a cabinet</dt><dd>Every stored message gets a number; a POST answers with it in <code>Location</code>. <code>GET /2</code> returns message 2 exactly as it was stored, as <code>message/http</code>. A stored reply is data; it is never replayed as the server's own answer. Localhost, no token, one CLI.</dd></div>
+</dl>
+
+<h2>Where the messages come from</h2>
+<p>Nobody types HTTP. People speak in prose; machines add the envelope.</p>
+<p>The model answers in HTTP because its system prompt asks it to. Your own words get wrapped on the way in: a small model on a <code>tee</code> branch reads what you typed and writes the headers, <code>X-Topic</code>, <code>X-Intent</code>, whatever fits, without touching a word of the body. Tool calls need no model at all; a hook translates them mechanically, <code>POST /tool/Read</code> with JSON args, a response with the result. Markdown notes with YAML front matter are header plus body already.</p>
+<p>One turn of a conversation, one file, one index over all of it: what was said, what was decided, which tool failed, which conclusion did not hold.</p>
+
+<section class="install">
+  <pre><code>pip install curldb</code></pre>
+  <p>One file, standard library only, Python 3.10 or newer. MIT.</p>
+  <div class="links">
+    <a href="https://github.com/rangersui/curldb">github.com/rangersui/curldb</a>
+    <a href="https://pypi.org/project/curldb/">pypi.org/project/curldb</a>
+  </div>
+</section>
+
+</main>
+
+<!-- ============================ ZH ============================ -->
+<main data-lang="zh">
+
+<section class="response" aria-label="用一条 HTTP response 说明 curldb">
+  <h1 class="status">HTTP/1.1 <span class="code">200</span> OK</h1>
+  <ul class="headers">
+    <li><span class="name">X-Thesis</span><span>curl is all you need</span></li>
+    <li><span class="name">X-Shape</span><span>prose in, headers out</span></li>
+    <li><span class="name">X-Stores</span><span>HTTP 消息,原样</span></li>
+    <li><span class="name">X-Install</span><span>pip install curldb</span></li>
+    <li><span class="name">Content-Type</span><span>text/plain</span></li>
+  </ul>
+  <div class="blank"></div>
+  <p class="body">AI 发出的每条消息本来就是一条 HTTP 消息。curldb 把它们留下来:<em>一个 session 一个 SQLite 文件,按信封查,</em>零进程,零依赖。</p>
+</section>
+
+<h2>HTTP 是最好的控制面</h2>
+<p>一条消息有三个位置。状态行说发生了什么,header 说这条消息是什么,body 是载荷。三十年的软件都认得这三个位置:代理、缓存、日志、限流器、你的终端。</p>
+<p>AI API 把方法放进一个 JSON 字段,角色放进另一个,内容放进第三个,再整个用 HTTP 发出去。HTTP 里套 JSON 再套 HTTP。header 一旦藏进正文,线上的每个工具都瞎了。</p>
+<p>让模型用 HTTP response 回答,它就会,还带着没人教过它的 header:<code>X-Verdict</code>、<code>X-Confidence</code>、<code>X-Scope</code>。它从整个 web 学会了这个形状。信封一直都在,API 把它吞了,curldb 把它留下。</p>
+
+<h2>进去是白话,出来是结构。不是 JSON。</h2>
+<p>你用白话问,回答带着状态行和 header 回来。这是没有 schema 的结构:不用先定义字段,不用维护解析器。<code>X-Confidence: 0.8</code> 这样一行,每个懂 HTTP 的读者一看就明白,模型也算。把消息存下来,header 就是索引,什么都不用抽取。</p>
+<p>动词、资源、结果,HTTP 里本来就各有各的位置。再往 payload 里塞一遍,就是线上最老的那个笑话:</p>
+<pre><code><span class="ok">HTTP/1.1 200 OK</span>
+Content-Type: application/json
+
+{"status": 404, "error": "not found"}</code></pre>
+<p>一路上的代理、缓存、日志看到的都是成功,只有最末端那个解析器知道失败了。状态行就在那,没人用。</p>
+
+<h2>tee</h2>
+<p>对话照常在你屏幕上。<code>tee</code> 分一份给 curldb。关掉终端,那一份还在。</p>
+<pre class="terminal" tabindex="0">$ claude 'how do I design a REST API for a todo app?' | tee /dev/tty | curldb add
+HTTP/1.1 200 OK
+X-Scope: design
+X-Confidence: 0.8
+
+Nouns, not verbs. /todos and /todos/42. POST creates, PATCH edits, DELETE removes. Let status codes carry the outcome.
+#1 200 +2 headers
+
+$ claude 'latest news on Rust async?' | tee /dev/tty | curldb add
+HTTP/1.1 200 OK
+X-Scope: news
+X-Confidence: 0.6
+
+Async closures stabilised. The runtime story is unchanged: pick one, stay on it.
+#2 200 +2 headers
+
+$ curldb query 'header:X-Scope=design'
+      1  09-11 11:13   200   Nouns, not verbs. /todos and /todos/42. POST creates
+
+$ curldb tags
+  X-Scope: design(1) news(1)
+  X-Confidence: 0.8(1) 0.6(1)
+</pre>
+<button type="button" class="replay" data-replay hidden><span data-lang="en">replay</span><span data-lang="zh">重放</span></button>
+<p>每条回答照常打印出来,同时进了 curldb,拿到一个编号。进去的路上什么都没解析,模型自己写的 header 就是索引。按 status、任意 header、body 全文查。</p>
+
+<h2>四条规矩</h2>
+<dl>
+  <div><dt>一个 session 一个文件</dt><dd>文件名就是 session。备份是 <code>cp</code>。跨 session 查就是对每个文件各查一遍。</dd></div>
+  <div><dt>header 是 tag</dt><dd>没有 schema。<code>X-Verdict: shaky</code> 程序读不懂,模型一看就懂,所以没见过的 header 也没关系。<code>curldb tags</code> 列出库里有什么,词表从数据里长出来。</dd></div>
+  <div><dt>body 永远原样</dt><dd>加 header 的人,你、模型、标注模型、hook,只加 header。标注者用 <code>Via:</code> 留名。</dd></div>
+  <div><dt>server 是档案柜</dt><dd>每条存进去的消息有一个编号,POST 的回复在 <code>Location</code> 里告诉你。<code>GET /2</code> 取回第 2 条,和存进去时一个字节不差,类型是 <code>message/http</code>。存的回答是数据,永远不当 server 自己的回答回放。只绑 localhost,没有 token,一个 CLI。</dd></div>
+</dl>
+
+<h2>消息从哪来</h2>
+<p>没人手写 HTTP。人说人话,信封机器来套。</p>
+<p>模型用 HTTP 回答,因为 system prompt 要求它这么做。你自己的话在进门的路上被套上信封:<code>tee</code> 分出一支给一个小模型,它读你打的字、写 header,<code>X-Topic</code>、<code>X-Intent</code>,合适什么写什么,body 一个字不碰。工具调用连模型都不用,一个 hook 机械翻译,<code>POST /tool/Read</code> 带 JSON 参数,response 带结果。带 YAML front matter 的 markdown 笔记,本来就是 header 加 body。</p>
+<p>一段对话,一个文件,一个索引盖住全部:说了什么,定了什么,哪个工具失败了,哪个结论没站住。</p>
+
+<section class="install">
+  <pre><code>pip install curldb</code></pre>
+  <p>一个文件,只用标准库,Python 3.10 以上。MIT。</p>
+  <div class="links">
+    <a href="https://github.com/rangersui/curldb">github.com/rangersui/curldb</a>
+    <a href="https://pypi.org/project/curldb/">pypi.org/project/curldb</a>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <span data-lang="en">Ranger Chen. Default port: 200.</span>
+  <span data-lang="zh">Ranger Chen。默认端口:200。</span>
+  <span>MIT</span>
+</footer>
+
+</div>
+<script>
+  (function () {
+    var root = document.documentElement;
+    var buttons = document.querySelectorAll("[data-set-lang]");
+    function apply(lang) {
+      root.setAttribute("data-lang", lang);
+      root.setAttribute("lang", lang === "zh" ? "zh-CN" : "en");
+      for (var i = 0; i < buttons.length; i++) {
+        buttons[i].setAttribute("aria-pressed", buttons[i].getAttribute("data-set-lang") === lang ? "true" : "false");
+      }
+      try { localStorage.setItem("curldb-lang", lang); } catch (e) {}
+    }
+    for (var i = 0; i < buttons.length; i++) {
+      buttons[i].addEventListener("click", function () { apply(this.getAttribute("data-set-lang")); });
+    }
+    apply(root.getAttribute("data-lang") || "en");
+  })();
+
+  // Terminal demo. The static transcript is the source; with motion
+  // allowed it is retyped command by command the first time it scrolls
+  // into view, and can be replayed. Without JS or with reduced motion the
+  // transcript stays as written.
+  (function () {
+    var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    var terminals = document.querySelectorAll("pre.terminal");
+
+    function classify(line) {
+      if (line.indexOf("$ ") === 0) return "cmd";
+      if (/^HTTP\/1\.1 [23]\d\d/.test(line)) return "ok";
+      return "out";
+    }
+
+    function lineNode(pre, line, cls) {
+      var span = document.createElement("span");
+      span.className = cls;
+      if (cls === "cmd") {
+        var p = document.createElement("span");
+        p.className = "p";
+        p.textContent = "$";
+        span.appendChild(p);
+        span.appendChild(document.createTextNode(line.slice(1)));
+      } else {
+        span.textContent = line;
+      }
+      pre.appendChild(span);
+      pre.appendChild(document.createTextNode("\n"));
+      pre.scrollTop = pre.scrollHeight;
+      return span;
+    }
+
+    function renderStatic(pre, lines) {
+      pre.textContent = "";
+      for (var i = 0; i < lines.length; i++) lineNode(pre, lines[i], classify(lines[i]));
+    }
+
+    function play(pre, lines, done) {
+      if (pre.dataset.playing === "1") return;
+      pre.dataset.playing = "1";
+      pre.textContent = "";
+      pre.scrollTop = 0;
+      var cursor = document.createElement("span");
+      cursor.className = "cursor";
+      var i = 0;
+
+      function finish() {
+        pre.appendChild(cursor);
+        pre.dataset.playing = "0";
+        if (done) done();
+      }
+
+      function typeCommand(line, cb) {
+        var span = document.createElement("span");
+        span.className = "cmd";
+        var p = document.createElement("span");
+        p.className = "p";
+        p.textContent = "$";
+        span.appendChild(p);
+        var text = document.createTextNode(" ");
+        span.appendChild(text);
+        pre.appendChild(span);
+        pre.appendChild(cursor);
+        var k = 2;
+        (function tick() {
+          if (k < line.length) {
+            text.data += line.charAt(k++);
+            pre.scrollTop = pre.scrollHeight;
+            setTimeout(tick, 28 + Math.random() * 45);
+          } else {
+            setTimeout(function () {
+              pre.removeChild(cursor);
+              pre.appendChild(document.createTextNode("\n"));
+              cb();
+            }, 380);
+          }
+        })();
+      }
+
+      function next() {
+        if (i >= lines.length) { finish(); return; }
+        var line = lines[i++];
+        var cls = classify(line);
+        if (cls === "cmd") {
+          setTimeout(function () { typeCommand(line, next); }, i === 1 ? 300 : 700);
+        } else {
+          lineNode(pre, line, cls);
+          setTimeout(next, line === "" ? 140 : 55);
+        }
+      }
+      next();
+    }
+
+    Array.prototype.forEach.call(terminals, function (pre) {
+      var lines = pre.textContent.replace(/\n$/, "").split("\n");
+      var replay = pre.nextElementSibling;
+      if (!(replay && replay.hasAttribute("data-replay"))) replay = null;
+      renderStatic(pre, lines);
+      if (reduce) return;
+
+      function run() {
+        play(pre, lines, function () { if (replay) replay.hidden = false; });
+      }
+      if (replay) replay.addEventListener("click", function () { replay.hidden = true; run(); });
+
+      if ("IntersectionObserver" in window) {
+        var seen = false;
+        var io = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (entry.isIntersecting && !seen) { seen = true; io.disconnect(); run(); }
+          });
+        }, { threshold: 0.35 });
+        io.observe(pre);
+      } else {
+        run();
+      }
+    });
+  })();
+</script>
+</body>
+</html>
