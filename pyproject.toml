@@ -3,7 +3,7 @@ requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "httpdb"
+name = "curldb"
 version = "0.1.0"
 description = "HTTP exchange datastore: raw requests and responses in, structured queries out. One SQLite file per session, zero daemon, zero dependencies."
 readme = "README.md"

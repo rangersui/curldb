@@ -2,6 +2,8 @@
 
 HTTP exchange datastore. One SQLite file per session; the requests and responses of an AI conversation stored as-is, queried by envelope fields.
 
+curl is the reference client, hence the PyPI name `curldb`: every operation the server accepts is one curl line, and the stored record is byte for byte what curl sent.
+
 [中文说明在后面](#中文)
 
 ## What it does
@@ -180,10 +182,10 @@ Full-text search uses FTS5 with the trigram tokenizer (SQLite 3.34+), so CJK sub
 ## Install
 
 ```bash
-pip install httpdb
+pip install curldb
 ```
 
-Or copy the one file:
+The PyPI name is `curldb`; the module and the command are `httpdb`. Or copy the one file:
 
 ```bash
 cp httpdb.py ~/.local/bin/httpdb
@@ -230,6 +232,8 @@ GitHub Actions runs the tests on Windows and Linux with Python 3.10 and 3.14, pl
 # 中文
 
 HTTP exchange 原生存储。一个 session 一个 SQLite 文件,AI 对话里的 request 和 response 原样存,按信封字段查。
+
+curl 是参考客户端,PyPI 名 `curldb` 由此而来:server 接受的每个操作都是一行 curl,存下来的记录就是 curl 发出去的那条消息,一个字节不差。
 
 ## 干嘛的
 
@@ -407,10 +411,10 @@ anyword                 裸词,body 搜索
 ## 安装
 
 ```bash
-pip install httpdb
+pip install curldb
 ```
 
-或者就一个文件,复制走:
+PyPI 上的名字是 `curldb`,模块和命令还是 `httpdb`。或者就一个文件,复制走:
 
 ```bash
 cp httpdb.py ~/.local/bin/httpdb

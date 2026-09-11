@@ -31,7 +31,7 @@ def main() -> None:
         names = wheel.namelist()
         metadata_path = next(n for n in names if n.endswith(".dist-info/METADATA"))
         metadata = message_from_bytes(wheel.read(metadata_path))
-        require(metadata["Name"] == "httpdb", "Unexpected package name")
+        require(metadata["Name"] == "curldb", "Unexpected package name")
         require(metadata["License-Expression"] == "MIT", "Missing MIT license expression")
         require(metadata.get_all("Requires-Dist", []) == [], "Unexpected runtime dependencies")
         license_path = metadata_path.rsplit("/", 1)[0] + "/licenses/LICENSE"
@@ -46,7 +46,7 @@ def main() -> None:
         require(version == code_version, "Package and code versions disagree")
 
     with tarfile.open(sources[0]) as source:
-        prefix = f"httpdb-{version}/"
+        prefix = f"curldb-{version}/"
         required = {"SYSTEM.md", "LICENSE", "README.md", "pyproject.toml", "httpdb.py",
                     "MANIFEST.in", "tests/test_httpdb.py", "scripts/check_dist.py"}
         missing = {prefix + name for name in required} - set(source.getnames())
