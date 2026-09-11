@@ -25,6 +25,7 @@ classifiers = [
 dependencies = []
 
 [project.urls]
+Homepage = "https://curldb.ai"
 Repository = "https://github.com/rangersui/curldb"
 
 [project.scripts]

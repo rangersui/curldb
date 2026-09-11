@@ -314,6 +314,13 @@ $ curldb tags
 <button type="button" class="replay" data-replay hidden><span data-lang="en">replay</span><span data-lang="zh">重放</span></button>
 <p>Each reply prints as usual and lands in curldb with a number. Nothing was parsed on the way in; the headers the model wrote are the index. Query by status, any header, or full text of the body.</p>
 
+<h2>A post office</h2>
+<p>A post office takes anything with an address on it, keeps the envelope with the letter, does not open the letter, and stamps a number on the way in. That is the whole of curldb. What sits in the file is not a record about a request; it is the request, byte for byte, envelope and all. Same for a response.</p>
+<p>Because the stored thing is the real thing, it can be sent again. A stored request goes back out on the wire as a request:</p>
+<pre><code><span class="p">$</span> curl -s localhost:200/1 | nc example.com 80</code></pre>
+<p>A stored response can be handed to a client as a response, and the client cannot tell it from a live one. Replaying, mocking, forwarding through nginx, re-annotating with a different model: none of it needs a converter, because nothing was converted going in.</p>
+<p>curldb keeps. Whoever sends, sends.</p>
+
 <h2>Four rules</h2>
 <dl>
   <div><dt>One session, one file</dt><dd>The file name is the session. Backup is <code>cp</code>. Searching across sessions is querying each file in turn.</dd></div>
@@ -333,6 +340,7 @@ $ curldb tags
   <div class="links">
     <a href="https://github.com/rangersui/curldb">github.com/rangersui/curldb</a>
     <a href="https://pypi.org/project/curldb/">pypi.org/project/curldb</a>
+    <a href="viewer.html">viewer: drop a session file, read it in the browser</a>
   </div>
 </section>
 
@@ -396,6 +404,13 @@ $ curldb tags
 <button type="button" class="replay" data-replay hidden><span data-lang="en">replay</span><span data-lang="zh">重放</span></button>
 <p>每条回答照常打印出来,同时进了 curldb,拿到一个编号。进去的路上什么都没解析,模型自己写的 header 就是索引。按 status、任意 header、body 全文查。</p>
 
+<h2>一个邮局</h2>
+<p>邮局做的事:收下任何写了地址的东西,信封和信一起留着,不拆信,进门时盖个编号。curldb 全部就是这个。文件里躺着的不是「关于某个请求的记录」,是那个请求本身,一个字节不差,连信封带内容。response 也一样。</p>
+<p>存的既然是本体,就能再寄一次。一条存下来的请求,原样推回线上就还是一条请求:</p>
+<pre><code><span class="p">$</span> curl -s localhost:200/1 | nc example.com 80</code></pre>
+<p>一条存下来的 response,交给某个客户端就是一条 response,客户端分不出它和现场的有什么区别。重放、mock、经 nginx 转发、换个模型重新标注:都不需要转换器,因为进来的时候什么都没转换。</p>
+<p>curldb 只管留着。谁要寄,谁寄。</p>
+
 <h2>四条规矩</h2>
 <dl>
   <div><dt>一个 session 一个文件</dt><dd>文件名就是 session。备份是 <code>cp</code>。跨 session 查就是对每个文件各查一遍。</dd></div>
@@ -415,6 +430,7 @@ $ curldb tags
   <div class="links">
     <a href="https://github.com/rangersui/curldb">github.com/rangersui/curldb</a>
     <a href="https://pypi.org/project/curldb/">pypi.org/project/curldb</a>
+    <a href="viewer.html">viewer:拖一个 session 文件进去,浏览器里直接看</a>
   </div>
 </section>
 

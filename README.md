@@ -108,7 +108,10 @@ GET  /<id>           the whole stored message, Content-Type: message/http
 HEAD /<id>           standard HEAD
 GET  /?q=<expr>      same as curldb query
 GET  /tags[/<name>]  same as curldb tags
+GET  /stats          same as curldb stats
 ```
+
+`GET /` and `HEAD /` answer with `X-Last: <highest id>`. Ids are never reused, so that number is both the record count and the tail of the log; a consumer polls `HEAD /` and reads `/<n>` from where it left off.
 
 The received request is the envelope; nothing to wrap:
 
@@ -124,6 +127,10 @@ The default port is 200. Ports below 1024 need root on Linux/macOS; `curldb serv
 An AI can curl straight in. A Codex review sent as `PUT /review` is stored as that PUT request with the review in the body; to store it as a response, use `curldb add` from the CLI.
 
 Bound to localhost, no token. The trust model is the CLI's: whoever can run curl on this machine.
+
+### Reading a file in the browser
+
+[curldb.ai/viewer.html](https://curldb.ai/viewer.html) (also `docs/viewer.html` in the repo) opens a session file dropped onto it: same query language, a tag panel, one record at a time with its raw envelope. SQLite runs in the tab as WebAssembly; the file never leaves the machine and `serve` is not involved. `serve` stays curl-only and sends no CORS headers, so no web page can read the archive through it.
 
 ## Querying afterwards
 
@@ -337,7 +344,10 @@ GET  /<id>           整条存的消息,Content-Type: message/http
 HEAD /<id>           标准 HEAD
 GET  /?q=<expr>      同 curldb query
 GET  /tags[/<name>]  同 curldb tags
+GET  /stats          同 curldb stats
 ```
+
+`GET /` 和 `HEAD /` 带 `X-Last: <最大编号>`。编号不复用,所以这个数既是记录总数也是日志的尾巴;消费者 `HEAD /` 看尾巴动没动,从自己记住的位置往后 `GET /<n>`。
 
 收到的请求本身就是信封,不用 wrap:
 
@@ -353,6 +363,10 @@ curl 'localhost:200/?q=status=409'
 AI 可以直接 curl 进来。Codex 的 review 以 `PUT /review` 发过来,存的是这个 PUT 请求,review 原文在 body 里;要把它当一条 response 存,走 CLI 的 `curldb add`。
 
 只绑 localhost,没有 token:信任模型和 CLI 一样,能在这台机器上跑 curl 的人。
+
+### 在浏览器里看一个文件
+
+[curldb.ai/viewer.html](https://curldb.ai/viewer.html)(仓库里是 `docs/viewer.html`)把 session 文件拖进去就能看:同一套查询语法、tag 面板、逐条看原始信封。SQLite 以 WebAssembly 跑在标签页里,文件不离开这台机器,和 `serve` 无关。`serve` 只给 curl 用,不发 CORS 头,任何网页都读不到档案。
 
 ## 事后查
 

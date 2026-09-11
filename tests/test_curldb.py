@@ -296,6 +296,19 @@ class HTTPTests(TemporaryDatabase):
                 self.assertEqual(headers["Content-Type"], head_headers["Content-Type"])
         self.assertIn(b"design(1)", self.request("GET", "/tags/X-Scope")[2])
 
+    def test_last_id_header_and_stats(self):
+        status, headers, _ = self.request("HEAD", "/")
+        self.assertEqual((status, headers["X-Last"]), (200, "0"))
+        rid = curldb.add(RAW)
+        status, headers, data = self.request("GET", "/")
+        self.assertEqual((status, headers["X-Last"]), (200, str(rid)))
+        self.assertEqual(self.request("HEAD", "/")[1]["X-Last"], str(rid))
+        status, headers, data = self.request("GET", "/stats")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["X-Last"], str(rid))
+        self.assertIn(b"records: 1", data)
+        self.assertIn(b"fts:", data)
+
     def test_missing_records_and_invalid_paths(self):
         for path in ("/999", "/missing"):
             with self.subTest(path=path):

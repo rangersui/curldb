@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>curldb viewer</title>
+<meta name="description" content="Open a curldb session file in the browser. Everything stays on your machine.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Noto+Serif+SC:wght@400;600&display=swap">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/sql-wasm.js"></script>
+<style>
+  :root {
+    --paper: #FFFFFF;
+    --ink: #1B1D22;
+    --muted: #6B6E76;
+    --rule: #D9DAD6;
+    --ok: #1F7A4D;
+    --warn: #A65A1E;
+    --code-bg: #F3F4F1;
+    --serif: "Newsreader", "Noto Serif SC", "Source Han Serif SC", "Songti SC", "SimSun", Georgia, "Times New Roman", serif;
+    --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #14161A; --ink: #E8E6E1; --muted: #9A9DA5; --rule: #2A2D33;
+      --ok: #62C08F; --warn: #E0955A; --code-bg: #1C1F24;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #14161A; --ink: #E8E6E1; --muted: #9A9DA5; --rule: #2A2D33;
+    --ok: #62C08F; --warn: #E0955A; --code-bg: #1C1F24;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: var(--serif); font-size: 1rem; line-height: 1.5;
+    display: flex; flex-direction: column;
+  }
+  a { color: inherit; }
+  :focus-visible { outline: 2px solid var(--ok); outline-offset: 2px; }
+
+  header {
+    display: flex; align-items: baseline; gap: 1.5rem; flex-wrap: wrap;
+    padding: 1rem 1.5rem; border-bottom: 1px solid var(--rule);
+  }
+  header .brand { font-family: var(--mono); font-size: 0.95rem; }
+  header .file { color: var(--muted); font-size: 0.95rem; flex: 1; min-width: 12rem; }
+  header .file b { color: var(--ink); font-weight: 500; }
+  header label.pick {
+    font-size: 0.9rem; text-decoration: underline; text-underline-offset: 0.2em; cursor: pointer;
+  }
+  header input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  header button.pick { font: inherit; font-family: var(--serif); background: none; border: 0; padding: 0; color: var(--ink); }
+  header .mode { font-family: var(--mono); font-size: 0.78rem; color: var(--muted); }
+  header .mode.live { color: var(--ok); }
+  header .mode.live::before { content: "CF "; }
+
+  .drop {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    padding: 3rem 1.5rem; text-align: center;
+  }
+  .drop.over { background: var(--code-bg); }
+  .drop .inner { max-width: 34rem; }
+  .drop h1 { font-weight: 500; font-style: italic; font-size: 2rem; margin: 0 0 0.75rem; }
+  .drop p { margin: 0 0 0.5rem; color: var(--muted); }
+  .drop code { font-family: var(--mono); font-size: 0.9em; background: var(--code-bg); padding: 0.08em 0.35em; }
+  .drop button.pick { font: inherit; background: none; border: 0; padding: 0; color: var(--ink); text-decoration: underline; text-underline-offset: 0.2em; cursor: pointer; }
+
+  .app { flex: 1; display: none; min-height: 0; }
+  .app.on { display: grid; grid-template-columns: var(--side, 17rem) 6px 1fr; }
+  .gutter { cursor: col-resize; background: transparent; }
+  .gutter:hover, .gutter.drag { background: var(--rule); }
+  @media (max-width: 52rem) { .app.on { grid-template-columns: 1fr; } aside { max-height: 14rem; } .gutter { display: none; } }
+
+  aside {
+    border-right: 1px solid var(--rule); overflow: auto; padding: 1rem 1.25rem; min-width: 0;
+    font-size: 0.9rem; scrollbar-width: none;
+  }
+  aside h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 0.6rem; font-weight: 500; }
+  aside .tag { margin: 0 0 0.75rem; }
+  aside .tag .name { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); }
+  aside button {
+    font: inherit; font-family: var(--serif); background: none; border: 0; padding: 0 0.15rem;
+    color: var(--ink); cursor: pointer; text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 0.2em;
+  }
+  aside button:hover { text-decoration-color: var(--ink); }
+  aside button.active { background: var(--ink); color: var(--paper); text-decoration: none; padding: 0 0.3rem; }
+  aside .n { color: var(--muted); font-variant-numeric: tabular-nums; }
+  aside .kinds { margin-bottom: 1.25rem; }
+
+  main { display: flex; flex-direction: column; min-height: 0; }
+  .query { padding: 1rem 1.5rem; border-bottom: 1px solid var(--rule); display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+  .query input {
+    flex: 1; min-width: 16rem; font: inherit; font-family: var(--mono); font-size: 0.9rem;
+    background: var(--code-bg); color: var(--ink); border: 1px solid var(--rule); padding: 0.5rem 0.7rem;
+  }
+  .query .count { color: var(--muted); font-size: 0.9rem; font-variant-numeric: tabular-nums; }
+  .query .hint { width: 100%; color: var(--muted); font-size: 0.85rem; font-family: var(--mono); }
+
+  .split { flex: 1; display: grid; grid-template-columns: minmax(20rem, 1fr) minmax(20rem, 1.2fr); min-height: 0; }
+  @media (max-width: 64rem) { .split { grid-template-columns: 1fr; } .list { max-height: 40vh; } }
+  .list { overflow: auto; border-right: 1px solid var(--rule); scrollbar-width: none; }
+  .row {
+    display: grid; grid-template-columns: 3.5rem 5.5rem 1fr; gap: 0.75rem; align-items: baseline;
+    padding: 0.55rem 1.5rem; border-bottom: 1px solid var(--rule); cursor: pointer;
+    font-size: 0.92rem;
+  }
+  .row:hover { background: var(--code-bg); }
+  .row.sel { background: var(--code-bg); box-shadow: inset 3px 0 0 var(--ok); }
+  .row .id { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .row .label { font-family: var(--mono); font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .label.ok { color: var(--ok); }
+  .row .label.err { color: var(--warn); }
+  .row .preview { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .ts { grid-column: 2 / 4; color: var(--muted); font-size: 0.78rem; font-family: var(--mono); }
+  .empty { padding: 2rem 1.5rem; color: var(--muted); }
+
+  .detail { overflow: auto; scrollbar-width: none; }
+  .detail pre {
+    margin: 0; padding: 1.25rem 1.5rem; font-family: var(--mono); font-size: 0.85rem; line-height: 1.55;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .detail pre .start { color: var(--ok); }
+  .detail pre .start.err { color: var(--warn); }
+  .detail pre .hn { color: var(--muted); }
+  .detail .meta { padding: 0.75rem 1.5rem; border-bottom: 1px solid var(--rule); color: var(--muted); font-size: 0.85rem; font-family: var(--mono); display: flex; gap: 1.5rem; flex-wrap: wrap; }
+  .detail .meta button { font: inherit; background: none; border: 0; color: var(--muted); text-decoration: underline; cursor: pointer; padding: 0; }
+  .detail .meta button:hover { color: var(--ok); }
+  .err-box { padding: 1rem 1.5rem; color: var(--warn); font-family: var(--mono); font-size: 0.85rem; }
+  aside::-webkit-scrollbar, .list::-webkit-scrollbar, .detail::-webkit-scrollbar { display: none; }
+
+  aside details { margin: 0 0 0.45rem; }
+  aside summary {
+    cursor: pointer; list-style: none; font-family: var(--mono); font-size: 0.8rem; color: var(--muted);
+    padding: 0.1rem 0; user-select: none;
+  }
+  aside summary::-webkit-details-marker { display: none; }
+  aside summary::marker { content: ""; }
+  aside summary .sum { display: flex; gap: 0.4rem; align-items: baseline; }
+  aside summary .sum::before { content: "+"; width: 0.8em; display: inline-block; color: var(--muted); }
+  aside details[open] summary .sum::before { content: "-"; }
+  aside summary:hover { color: var(--ink); }
+  aside summary .n { margin-left: auto; }
+  aside details .vals { padding: 0.15rem 0 0.2rem 1.2em; }
+  aside details .vals button { display: inline; }
+  aside .more { color: var(--muted); font-size: 0.8rem; }
+
+</style>
+</head>
+<body>
+
+<header>
+  <span class="brand">curldb viewer</span>
+  <span class="file" id="file-name">no file open</span>
+  <span class="mode" id="mode" hidden></span>
+  <button type="button" class="pick" id="pick-live" hidden>open a .sqlite (live)</button>
+  <label class="pick">open a .sqlite<input type="file" id="file-input" accept=".sqlite,.db,.sqlite3"></label>
+</header>
+
+<section class="drop" id="drop">
+  <div class="inner">
+    <h1>Drop a curldb session file here</h1>
+    <p>A <code>curldb.sqlite</code> from any session. It is read in this tab with SQLite compiled to WebAssembly; nothing leaves your machine.</p>
+    <p>Same query language as the command line: <code>status=409</code>, <code>header:X-Scope=design</code>, <code>path~/tool/</code>, <code>body~word</code>.</p>
+    <p id="live-hint" hidden>Or <button type="button" class="pick" id="pick-live-2">open it live</button>: the page re-reads the file every two seconds while it grows. Chrome and Edge only; a dropped file is a snapshot.</p>
+    <p id="load-state"></p>
+  </div>
+</section>
+
+<div class="app" id="app">
+  <aside id="tags"></aside>
+  <div class="gutter" id="gutter" title="drag to resize"></div>
+  <main>
+    <div class="query">
+      <input id="q" type="text" placeholder="status=200 header:X-Scope=design body~api" autocomplete="off" spellcheck="false">
+      <span class="count" id="count"></span>
+      <span class="hint">kind=  status=  method=  path=  path~  header:Name  header:Name=value  body~word  word</span>
+    </div>
+    <div class="split">
+      <div class="list" id="list"></div>
+      <div class="detail" id="detail"><div class="empty">Select a record.</div></div>
+    </div>
+  </main>
+</div>
+
+<script>
+(function () {
+  var SQL = null, db = null, selected = null;
+  function $(id) { return document.getElementById(id); }
+
+  // Sidebar width: drag the gutter; the value is kept in this browser.
+  (function () {
+    var app = $("app"), gutter = $("gutter");
+    try { var saved = localStorage.getItem("curldb-viewer-side"); if (saved) app.style.setProperty("--side", saved); } catch (e) {}
+    gutter.addEventListener("pointerdown", function (e) {
+      e.preventDefault();
+      gutter.classList.add("drag");
+      gutter.setPointerCapture(e.pointerId);
+      var left = app.getBoundingClientRect().left;
+      function move(ev) {
+        var w = Math.max(160, Math.min(ev.clientX - left, window.innerWidth * 0.6));
+        app.style.setProperty("--side", w + "px");
+      }
+      function up() {
+        gutter.classList.remove("drag");
+        gutter.removeEventListener("pointermove", move);
+        gutter.removeEventListener("pointerup", up);
+        try { localStorage.setItem("curldb-viewer-side", app.style.getPropertyValue("--side")); } catch (e) {}
+      }
+      gutter.addEventListener("pointermove", move);
+      gutter.addEventListener("pointerup", up);
+    });
+  })();
+
+  // sql.js: SQLite compiled to WebAssembly, runs in this tab only.
+  var ready = initSqlJs({
+    locateFile: function (f) { return "https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/" + f; }
+  }).then(function (s) { SQL = s; }, function (e) {
+    $("load-state").textContent = "sql.js failed to load: " + e;
+  });
+
+  var live = { handle: null, timer: null, hash: null };
+
+  function loadBuffer(buffer, name, size, mode) {
+    return ready.then(function () {
+      var fresh;
+      try {
+        fresh = new SQL.Database(new Uint8Array(buffer));
+        fresh.exec("SELECT id FROM records LIMIT 1");
+      } catch (e) {
+        $("load-state").textContent = "not a curldb file: " + e.message;
+        return false;
+      }
+      if (db) db.close();
+      db = fresh;
+      var label = $("file-name");
+      label.textContent = "";
+      var b = document.createElement("b");
+      b.textContent = name;
+      label.appendChild(b);
+      label.appendChild(document.createTextNode(" " + Math.round(size / 1024) + " KB"));
+      var m = $("mode");
+      m.hidden = false;
+      m.className = "mode" + (mode === "live" ? " live" : "");
+      m.textContent = mode === "live" ? "live" : "snapshot";
+      $("drop").style.display = "none";
+      $("app").classList.add("on");
+      renderTags();
+      runQuery($("q").value);
+      if (selected !== null) showRecord(selected);
+      return true;
+    });
+  }
+
+  function readInto(file, mode) {
+    return new Promise(function (resolve) {
+      var reader = new FileReader();
+      reader.onload = function () { resolve(loadBuffer(reader.result, file.name, file.size, mode)); };
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  function stopLive() {
+    clearTimeout(live.timer);
+    live.handle = null; live.timer = null; live.hash = null;
+  }
+
+  function openFile(file) {
+    stopLive();
+    readInto(file, "snapshot").then(function () { $("q").focus(); });
+  }
+
+  // Live mode: keep a handle from the picker and re-read the file whenever
+  // its size or mtime changes. curldb writers open and close per operation,
+  // so SQLite checkpoints the WAL on close and the main file stays current.
+  // Compare bytes, not size/mtime: a SQLite write can leave the size
+  // unchanged, and file metadata through a handle is not always fresh.
+  function checksum(buffer) {
+    var bytes = new Uint8Array(buffer), h = 2166136261;
+    for (var i = 0; i < bytes.length; i++) { h ^= bytes[i]; h = Math.imul(h, 16777619); }
+    return (h >>> 0) + ":" + bytes.length;
+  }
+
+  function poll() {
+    if (!live.handle) return;
+    live.handle.getFile().then(function (file) {
+      return file.arrayBuffer().then(function (buffer) {
+        var h = checksum(buffer);
+        var changed = h !== live.hash;
+        live.hash = h;
+        var done = changed ? loadBuffer(buffer, file.name, buffer.byteLength, "live") : Promise.resolve(true);
+        return done.then(function () {
+          var m = $("mode");
+          m.className = "mode live";
+          m.textContent = "live " + new Date().toLocaleTimeString() + " " + Math.round(buffer.byteLength / 1024) + " KB";
+        });
+      });
+    }).catch(function (e) {
+      $("mode").textContent = "live read failed: " + e.message;
+      $("mode").className = "mode";
+      stopLive();
+    }).then(function () { if (live.handle) live.timer = setTimeout(poll, 2000); });
+  }
+
+  function openLive() {
+    window.showOpenFilePicker({ multiple: false }).then(function (handles) {
+      stopLive();
+      live.handle = handles[0];
+      poll();
+      $("q").focus();
+    }).catch(function () {});
+  }
+
+  if (window.showOpenFilePicker) {
+    ["pick-live", "pick-live-2"].forEach(function (id) {
+      var el = $(id);
+      if (!el) return;
+      el.hidden = false;
+      el.addEventListener("click", openLive);
+    });
+    $("live-hint").hidden = false;
+  } else if (navigator.brave) {
+    // Brave ships with the File System Access API switched off.
+    var hint = $("live-hint");
+    hint.hidden = false;
+    hint.textContent = "Live view needs the File System Access API, which Brave disables by default: enable brave://flags/#file-system-access-api and relaunch. A dropped file is a snapshot.";
+  }
+  $("file-input").addEventListener("change", function () { if (this.files[0]) openFile(this.files[0]); });
+  ["dragenter", "dragover"].forEach(function (ev) {
+    document.addEventListener(ev, function (e) { e.preventDefault(); $("drop").classList.add("over"); });
+  });
+  ["dragleave", "drop"].forEach(function (ev) {
+    document.addEventListener(ev, function (e) { e.preventDefault(); $("drop").classList.remove("over"); });
+  });
+  document.addEventListener("drop", function (e) {
+    var f = e.dataTransfer && e.dataTransfer.files[0];
+    if (f) openFile(f);
+  });
+
+  function rows(sql, params) {
+    var st = db.prepare(sql);
+    st.bind(params || []);
+    var out = [];
+    while (st.step()) out.push(st.getAsObject());
+    st.free();
+    return out;
+  }
+  var ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" };
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return ESC[c]; }); }
+  function pad(n) { return (n < 10 ? "0" : "") + n; }
+  function tsShort(ts) {
+    var d = new Date(ts * 1000);
+    return pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+  }
+  function label(r) {
+    if (r.kind === "response") return String(r.status);
+    if (r.kind === "request") return r.method + " " + r.path;
+    return r.kind + (r.path ? " " + r.path.split("/").pop() : "");
+  }
+  function labelClass(r) {
+    if (r.kind !== "response") return "";
+    if (r.status >= 400) return "err";
+    if (r.status >= 200 && r.status < 300) return "ok";
+    return "";
+  }
+
+  function renderTags() {
+    var kinds = rows("SELECT kind, count(*) AS n FROM records GROUP BY kind ORDER BY n DESC");
+    var statuses = rows("SELECT status, count(*) AS n FROM records WHERE status IS NOT NULL GROUP BY status ORDER BY status");
+    var hdrs = rows("SELECT name, value, count(*) AS n FROM headers GROUP BY name, value ORDER BY name, n DESC, value");
+    var html = '<div class="kinds"><h2>records</h2>';
+    kinds.forEach(function (k) {
+      html += '<div><button data-q="kind=' + esc(k.kind) + '">' + esc(k.kind) + '</button> <span class="n">' + k.n + "</span></div>";
+    });
+    if (statuses.length) {
+      html += '<div style="margin-top:.5rem">';
+      statuses.forEach(function (s) {
+        html += '<button data-q="status=' + s.status + '">' + s.status + '</button> <span class="n">' + s.n + "</span> &nbsp;";
+      });
+      html += "</div>";
+    }
+    html += "</div><h2>headers</h2>";
+    var groups = {}, order = [];
+    hdrs.forEach(function (h) {
+      if (!groups[h.name]) { groups[h.name] = []; order.push(h.name); }
+      groups[h.name].push(h);
+    });
+    order.forEach(function (name) {
+      var vals = groups[name];
+      var total = vals.reduce(function (a, v) { return a + v.n; }, 0);
+      var open = vals.length <= 6 ? " open" : "";
+      html += "<details" + open + '><summary><span class="sum">' + esc(name) + '<span class="n">' + vals.length + (vals.length === 1 ? " value" : " values") + " / " + total + '</span></span></summary><div class="vals">';
+      vals.slice(0, 60).forEach(function (h) {
+        var q = "header:" + h.name + "=" + h.value;
+        html += '<button data-q="' + esc(q) + '">' + esc(h.value || "(empty)") + '</button><span class="n">' + h.n + "</span> ";
+      });
+      if (vals.length > 60) html += '<span class="more">+' + (vals.length - 60) + " more</span>";
+      html += "</div></details>";
+    });
+    $("tags").innerHTML = html;
+  }
+  // Clicking a tag toggles it: present in the query -> removed, absent -> appended.
+  function quoteTerm(term) { return /\s/.test(term) ? '"' + term + '"' : term; }
+  $("tags").addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-q]");
+    if (!b) return;
+    var q = $("q");
+    var term = b.getAttribute("data-q");
+    var tokens = tokenize(q.value).filter(function (t) { return t.replace(/^"|"$/g, "") !== term; });
+    if (tokens.length === tokenize(q.value).length) tokens.push(quoteTerm(term));
+    q.value = tokens.join(" ");
+    runQuery(q.value);
+  });
+  function markActiveTags() {
+    var active = {};
+    tokenize($("q").value).forEach(function (t) { active[t.replace(/^"|"$/g, "")] = true; });
+    Array.prototype.forEach.call($("tags").querySelectorAll("button[data-q]"), function (b) {
+      b.classList.toggle("active", !!active[b.getAttribute("data-q")]);
+    });
+  }
+
+  // Query DSL, same shape as the command line. Body search is LIKE here.
+  function tokenize(expr) {
+    var out = [], cur = "", inq = false;
+    for (var i = 0; i < expr.length; i++) {
+      var ch = expr.charAt(i);
+      if (ch === '"') { inq = !inq; cur += ch; }
+      else if (ch === " " && !inq) { if (cur) { out.push(cur); cur = ""; } }
+      else cur += ch;
+    }
+    if (cur) out.push(cur);
+    return out;
+  }
+  function buildSql(expr) {
+    var wheres = [], params = [], joins = [], hn = 0;
+    tokenize(expr).forEach(function (tok) {
+      tok = tok.replace(/^"|"$/g, "");
+      var m;
+      if ((m = tok.match(/^kind=(request|response|note|raw)$/))) { wheres.push("r.kind = ?"); params.push(m[1]); return; }
+      if ((m = tok.match(/^status=(\d[\d,]*)$/))) {
+        var codes = m[1].split(",").map(Number);
+        wheres.push("r.status IN (" + codes.map(function () { return "?"; }).join(",") + ")");
+        params.push.apply(params, codes);
+        return;
+      }
+      if ((m = tok.match(/^method=([A-Za-z]+)$/))) { wheres.push("r.method = ?"); params.push(m[1].toUpperCase()); return; }
+      if ((m = tok.match(/^path=(\S+)$/))) { wheres.push("r.path = ?"); params.push(m[1]); return; }
+      if ((m = tok.match(/^path~(\S+)$/))) { wheres.push("r.path LIKE ?"); params.push("%" + m[1] + "%"); return; }
+      if ((m = tok.match(/^header:([^=]+)=(.*)$/))) {
+        var a = "h" + hn++;
+        joins.push("JOIN headers " + a + " ON " + a + ".record_id = r.id");
+        wheres.push("LOWER(" + a + ".name) = LOWER(?)");
+        wheres.push(a + ".value = ?");
+        params.push(m[1], m[2]);
+        return;
+      }
+      if ((m = tok.match(/^header:(\S+)$/))) {
+        var b = "h" + hn++;
+        joins.push("JOIN headers " + b + " ON " + b + ".record_id = r.id");
+        wheres.push("LOWER(" + b + ".name) = LOWER(?)");
+        params.push(m[1]);
+        return;
+      }
+      m = tok.match(/^body[~:](.+)$/);
+      wheres.push("r.body LIKE ?");
+      params.push("%" + (m ? m[1] : tok) + "%");
+    });
+    return {
+      sql: "SELECT DISTINCT r.id, r.kind, r.status, r.method, r.path, r.ts, substr(r.body, 1, 160) AS preview FROM records r " +
+           joins.join(" ") + " WHERE " + (wheres.length ? wheres.join(" AND ") : "1") + " ORDER BY r.id DESC LIMIT 500",
+      params: params
+    };
+  }
+
+  function runQuery(expr) {
+    markActiveTags();
+    var built = buildSql(expr || "");
+    var list = $("list"), result;
+    try { result = rows(built.sql, built.params); }
+    catch (e) { list.innerHTML = '<div class="err-box">' + esc(e.message) + "</div>"; $("count").textContent = ""; return; }
+    $("count").textContent = result.length + (result.length === 500 ? "+" : "");
+    if (!result.length) { list.innerHTML = '<div class="empty">(no matches)</div>'; return; }
+    list.innerHTML = result.map(function (r) {
+      return '<div class="row' + (selected === r.id ? " sel" : "") + '" data-id="' + r.id + '">' +
+        '<span class="id">' + r.id + "</span>" +
+        '<span class="label ' + labelClass(r) + '">' + esc(label(r)) + "</span>" +
+        '<span class="preview">' + esc((r.preview || "").replace(/\s+/g, " ")) + "</span>" +
+        '<span class="ts">' + tsShort(r.ts) + "</span></div>";
+    }).join("");
+  }
+  var timer = null;
+  $("q").addEventListener("input", function () {
+    clearTimeout(timer);
+    timer = setTimeout(function () { runQuery($("q").value); }, 120);
+  });
+  $("list").addEventListener("click", function (e) {
+    var row = e.target.closest(".row[data-id]");
+    if (!row) return;
+    selected = Number(row.getAttribute("data-id"));
+    Array.prototype.forEach.call($("list").querySelectorAll(".row"), function (r) {
+      r.classList.toggle("sel", Number(r.getAttribute("data-id")) === selected);
+    });
+    showRecord(selected);
+  });
+
+  function showRecord(id) {
+    var r = rows("SELECT id, kind, status, method, path, raw, ts FROM records WHERE id = ?", [id])[0];
+    if (!r) return;
+    var raw = r.raw.replace(/\r\n/g, "\n");
+    var html = "";
+    if (r.kind === "note" || r.kind === "raw") {
+      html = esc(raw);
+    } else {
+      var idx = raw.indexOf("\n\n");
+      var head = idx >= 0 ? raw.slice(0, idx) : raw;
+      var body = idx >= 0 ? raw.slice(idx + 2) : "";
+      var lines = head.split("\n");
+      var startCls = r.kind === "response" && r.status >= 400 ? "start err" : "start";
+      html += '<span class="' + startCls + '">' + esc(lines[0]) + "</span>\n";
+      lines.slice(1).forEach(function (l) {
+        var i = l.indexOf(":");
+        html += i > 0 ? '<span class="hn">' + esc(l.slice(0, i + 1)) + "</span>" + esc(l.slice(i + 1)) + "\n" : esc(l) + "\n";
+      });
+      html += "\n" + esc(body);
+    }
+    $("detail").innerHTML =
+      '<div class="meta"><span>#' + r.id + "</span><span>" + esc(r.kind) + "</span><span>" +
+      esc(new Date(r.ts * 1000).toLocaleString()) + '</span><button id="copy" type="button">copy raw</button></div>' +
+      "<pre>" + html + "</pre>";
+    $("copy").addEventListener("click", function () {
+      navigator.clipboard.writeText(r.raw).then(function () {
+        $("copy").textContent = "copied";
+        setTimeout(function () { $("copy").textContent = "copy raw"; }, 1200);
+      });
+    });
+  }
+})();
+</script>
+</body>
+</html>

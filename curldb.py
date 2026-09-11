@@ -517,6 +517,15 @@ def stats() -> dict:
     return {"count": count, "kinds": kinds, "size_bytes": size,
             "path": path, "trigram": trigram}
 
+
+def last_id() -> int:
+    """Highest record id, 0 when empty. Ids are never reused, so this
+    is also the record count and the tail a consumer follows."""
+    conn = _connect()
+    last = conn.execute("SELECT max(id) FROM records").fetchone()[0]
+    conn.close()
+    return int(last or 0)
+
 # -----------------------------------------------
 # SERVE
 # -----------------------------------------------
@@ -578,7 +587,11 @@ def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
             if url.path == "/":
                 q = parse_qs(url.query).get("q", [""])[0]
                 results = query(q) if q else ls()
-                self._text(200, _format_results(results), head_only=head_only)
+                self._text(200, _format_results(results), {"X-Last": str(last_id())},
+                           head_only=head_only)
+            elif url.path == "/stats":
+                self._text(200, _format_stats(stats()), {"X-Last": str(last_id())},
+                           head_only=head_only)
             elif url.path == "/tags" or url.path.startswith("/tags/"):
                 name = url.path[len("/tags/"):] or None
                 self._text(200, _format_tags(tags(name)), head_only=head_only)
@@ -669,6 +682,16 @@ def _format_tags(t: dict[str, list[tuple[str, int]]]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _format_stats(s: dict) -> str:
+    lines = [
+        f"  records: {s['count']}  {s['kinds']}",
+        f"  size:    {s['size_bytes'] / 1024:.1f} KB",
+        f"  path:    {s['path']}",
+        f"  fts:     {'trigram' if s['trigram'] else 'unicode61 + LIKE'}",
+    ]
+    return chr(10).join(lines) + chr(10)
+
+
 def _print_results(results: list[dict]) -> None:
     sys.stdout.write(_format_results(results))
 
@@ -711,7 +734,8 @@ curldb -- HTTP exchange datastore (one sqlite file per session)
   serve [port]         HTTP door on 127.0.0.1 (default 200; root below 1024 on unix):
                        POST/PUT anything -> stored as received, 201 + Location
                        GET /<id> -> the stored message (message/http)
-                       GET /?q=<expr>, GET /tags[/<name>] -> same as the CLI
+                       GET /?q=<expr>, GET /tags[/<name>], GET /stats -> same as the CLI
+                       GET / and HEAD / carry X-Last: <highest id> (the log tail)
 
 query DSL (tokens AND'd together):
   kind=request|response|note|raw   status=200   status=200,201
@@ -808,11 +832,7 @@ def cli(argv: list[str] | None = None) -> None:
         _print_results(ls(int(rest[0]) if rest else 20))
 
     elif cmd == "stats":
-        s = stats()
-        print(f"  records: {s['count']}  {s['kinds']}")
-        print(f"  size:    {s['size_bytes'] / 1024:.1f} KB")
-        print(f"  path:    {s['path']}")
-        print(f"  fts:     {'trigram' if s['trigram'] else 'unicode61 + LIKE'}")
+        sys.stdout.write(_format_stats(stats()))
 
     else:
         _die(f"unknown: {cmd}")
