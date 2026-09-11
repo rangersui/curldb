@@ -21,7 +21,7 @@ import time
 from email.utils import formatdate
 from http import HTTPStatus
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 DEFAULT_DB = "curldb.sqlite"
 
@@ -33,8 +33,8 @@ _STATUS_LINE = re.compile(r"HTTP/[\d.]+\s+(\d{3})")
 _REQUEST_LINE = re.compile(r"([A-Z]+)\s+(\S+)\s+HTTP/[\d.]+")
 
 
-def parse_envelope(raw: str, source_path: str | None = None) -> dict:
-    """Parse raw text into its parts.
+def parse_envelope(raw: bytes | str, source_path: str | None = None) -> dict:
+    """Parse a raw record into its parts.
 
     Returns {kind, status, method, path, headers, body}. kind is
     "response" (status line first), "request" (request line first),
@@ -45,7 +45,14 @@ def parse_envelope(raw: str, source_path: str | None = None) -> dict:
     Lenient: accepts \\n or \\r\\n, ignores malformed headers,
     ignores Content-Length. This is a document parser, not a
     protocol parser.
+
+    Bytes that are not UTF-8 go through _parse_binary: the head is
+    still indexed, the body stays out of the index.
     """
+    if isinstance(raw, bytes):
+        if not _is_text(raw):
+            return _parse_binary(raw, source_path)
+        raw = raw.decode("utf-8")
     text = raw.replace("\r\n", "\n")
     lines = text.split("\n")
     first = lines[0] if lines else ""
@@ -87,6 +94,35 @@ def parse_envelope(raw: str, source_path: str | None = None) -> dict:
             name, _, value = line.partition(":")
             out["headers"].append((name.strip(), value.strip()))
     return out
+
+
+def _parse_binary(data: bytes, source_path: str | None) -> dict:
+    """A record whose bytes are not UTF-8 text. When it starts with a
+    status line or a request line, the head is parsed as text and the
+    body is left out of the index (empty body column, no full-text
+    entry). Anything else is a raw record with an empty body."""
+    cuts = [i for i in (data.find(b"\r\n\r\n"), data.find(b"\n\n")) if i >= 0]
+    head = data[:min(cuts)] if cuts else data
+    out = parse_envelope(head.decode("utf-8", "replace") + "\n\n", source_path)
+    if out["kind"] in ("request", "response"):
+        out["body"] = ""
+        return out
+    path = source_path.replace("\\", "/") if source_path else None
+    return {"kind": "raw", "status": None, "method": None, "path": path,
+            "headers": [], "body": ""}
+
+
+def _is_text(data: bytes) -> bool:
+    """UTF-8 with no NUL byte. The NUL rule is the one git and grep use;
+    it keeps binary data that happens to be valid UTF-8 (a run of low
+    bytes) out of the text index."""
+    if b"\x00" in data:
+        return False
+    try:
+        data.decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        return False
 
 
 def _unquote(value: str) -> str:
@@ -185,12 +221,13 @@ def _flatten_front_matter(lines: list[str]) -> list[tuple[str, str]]:
     return out
 
 
-def wrap(start: str, body: str, headers: list[tuple[str, str]]) -> str:
+def wrap(start: str, body: bytes | str, headers: list[tuple[str, str]]) -> bytes | str:
     """Build an HTTP envelope around body.
 
     start is either a status code ("200") or a request line
     ("POST /chat"). A Date header is added when the caller did not
-    supply one. body is stored byte-for-byte.
+    supply one. body is appended as given; a bytes body gives a bytes
+    envelope, a str body a str one.
     """
     if re.fullmatch(r"\d{3}", start):
         code = int(start)
@@ -206,7 +243,10 @@ def wrap(start: str, body: str, headers: list[tuple[str, str]]) -> str:
     if "date" not in names:
         lines.append("Date: " + time.strftime("%Y-%m-%dT%H:%M:%S%z"))
     lines.extend(f"{n}: {v}" for n, v in headers)
-    return "\n".join(lines) + "\n\n" + body
+    head = "\n".join(lines) + "\n\n"
+    if isinstance(body, bytes):
+        return head.encode("utf-8") + body
+    return head + body
 
 # -----------------------------------------------
 # DB
@@ -309,9 +349,11 @@ def _drop_v1(conn: sqlite3.Connection) -> list[tuple[str, float]]:
     return rows
 
 
-def add(raw: str, conn: sqlite3.Connection | None = None,
+def add(raw: bytes | str, conn: sqlite3.Connection | None = None,
         ts: float | None = None, source_path: str | None = None) -> int:
-    """Store one raw envelope. Returns the new record id."""
+    """Store one raw record, as bytes. Returns the new record id."""
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8")
     own = conn is None
     if own:
         conn = _connect()
@@ -332,20 +374,27 @@ def add(raw: str, conn: sqlite3.Connection | None = None,
     return rid
 
 
-def get(rid: int) -> str | None:
+def get(rid: int) -> bytes | None:
     row = get_row(rid)
     return row["raw"] if row else None
 
 
 def get_row(rid: int) -> dict | None:
-    """One record with its index fields: id, kind, status, method, path, ts, raw."""
+    """One record with its index fields: id, kind, status, method, path,
+    ts, and raw as bytes (rows written before 0.3 were text; they come
+    back encoded)."""
     conn = _connect()
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         "SELECT id, kind, status, method, path, ts, raw FROM records WHERE id=?",
         (rid,)).fetchone()
     conn.close()
-    return dict(row) if row else None
+    if row is None:
+        return None
+    out = dict(row)
+    if isinstance(out["raw"], str):
+        out["raw"] = out["raw"].encode("utf-8")
+    return out
 
 # -----------------------------------------------
 # QUERY
@@ -548,6 +597,14 @@ def last_id() -> int:
 DEFAULT_PORT = 200   # HTTP 200. Below 1024, so root on Linux/macOS.
 
 
+_CONTENT_TYPES = {
+    "request": "message/http",
+    "response": "message/http",
+    "note": "text/markdown; charset=utf-8",
+    "raw": "text/plain; charset=utf-8",
+}
+
+
 def _utf8_from_latin1(text: str) -> str:
     try:
         return text.encode("latin-1").decode("utf-8")
@@ -590,9 +647,15 @@ def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
             if row is None:
                 self._text(404, "not found\n", head_only=head_only)
                 return
-            data = row["raw"].encode("utf-8")
+            data = row["raw"]
             self.send_response(200)
-            self.send_header("Content-Type", "message/http")
+            # The body is the raw column, so the type names what those
+            # bytes are: an HTTP message, a markdown note, plain text, or
+            # bytes that are none of those.
+            ctype = _CONTENT_TYPES.get(row["kind"], "text/plain; charset=utf-8")
+            if row["kind"] == "raw" and not _is_text(data):
+                ctype = "application/octet-stream"
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
             # The outer headers describe the stored message; the body is
             # the message itself. Same fields as one line of `curldb ls`.
@@ -641,9 +704,53 @@ def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
         def do_HEAD(self) -> None:
             self._read(head_only=True)
 
+        def _read_chunked(self) -> bytes:
+            """Join a chunked body. Raises ValueError on a short chunk, a
+            missing chunk terminator, a bad size, or a stream that ends
+            before the zero-length chunk."""
+            parts = []
+            while True:
+                line = self.rfile.readline()
+                if not line:
+                    raise ValueError("stream ended before the last chunk")
+                size = int(line.split(b";")[0].strip(), 16)
+                if size == 0:
+                    while True:
+                        trailer = self.rfile.readline()
+                        if not trailer:
+                            raise ValueError("stream ended inside the trailer")
+                        if not trailer.strip():
+                            return b"".join(parts)
+                chunk = self.rfile.read(size)
+                if len(chunk) != size:
+                    raise ValueError(f"chunk of {size} bytes ended after {len(chunk)}")
+                if self.rfile.readline().strip():
+                    raise ValueError("chunk not followed by an empty line")
+                parts.append(chunk)
+
         def _store(self) -> None:
-            length = int(self.headers.get("Content-Length") or 0)
-            body = self.rfile.read(length).decode("utf-8", "replace")
+            # Body bytes are kept as they came. A chunked body is joined and
+            # stored with its length, so the stored message is self-contained.
+            coding = (self.headers.get("Transfer-Encoding") or "").strip().lower()
+            if coding == "chunked":
+                try:
+                    body = self._read_chunked()
+                except ValueError as e:
+                    self._text(400, f"incomplete chunked body: {e}" + chr(10))
+                    return
+            elif coding:
+                self._text(501, f"Transfer-Encoding {coding}: send Content-Length or Transfer-Encoding: chunked" + chr(10))
+                return
+            else:
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    self._text(400, "Content-Length is not a number" + chr(10))
+                    return
+                body = self.rfile.read(length)
+                if len(body) != length:
+                    self._text(400, f"body ended after {len(body)} of {length} bytes" + chr(10))
+                    return
             # message/http says the body IS an HTTP message. Store the body
             # itself and drop this request's envelope, so a response (or a
             # request) can be archived as what it is, not wrapped in a POST.
@@ -663,9 +770,16 @@ def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
             # would be stored double-encoded.
             path = _utf8_from_latin1(self.path)
             lines = [f"{self.command} {path} {self.request_version}"]
+            # A chunked message is stored joined: Transfer-Encoding goes,
+            # and so does any Content-Length it carried, replaced by the
+            # length of the bytes actually stored.
+            skip = {"transfer-encoding", "content-length"} if coding else set()
             lines.extend(f"{_utf8_from_latin1(k)}: {_utf8_from_latin1(v)}"
-                         for k, v in self.headers.items())
-            raw = "\n".join(lines) + "\n\n" + body
+                         for k, v in self.headers.items()
+                         if k.lower() not in skip)
+            if coding:
+                lines.append(f"Content-Length: {len(body)}")
+            raw = ("\n".join(lines) + "\n\n").encode("utf-8") + body
             rid = add(raw)
             self._text(201, f"#{rid}\n", {"Location": f"/{rid}"})
 
@@ -761,18 +875,18 @@ def _die(msg: str) -> None:
     sys.exit(1)
 
 
-def _write_raw(text: str) -> None:
-    """Envelopes leave exactly as stored: bytes, no newline translation."""
+def _write_raw(data: bytes) -> None:
+    """Records leave exactly as stored: bytes, no newline translation."""
     sys.stdout.flush()
-    sys.stdout.buffer.write(text.encode("utf-8"))
+    sys.stdout.buffer.write(data)
     sys.stdout.buffer.flush()
 
 
 HELP = """\
 curldb -- HTTP exchange datastore (one sqlite file per session)
 
-  add [file]           store a raw HTTP request/response, or a markdown
-                       file with --- front matter (stdin or file)
+  add [file]           store a raw HTTP request/response, a markdown file
+                       with --- front matter, or any bytes (stdin or file)
   wrap START [-H N:V]  wrap stdin body in an envelope; START is a status
                        code (200) or a request line (POST /chat)
   get <id>             print raw record by id
@@ -785,9 +899,12 @@ curldb -- HTTP exchange datastore (one sqlite file per session)
                        POST/PUT anything -> stored as received, 201 + Location
                        POST with Content-Type: message/http -> the body is the
                        record (a response or request stored as itself)
-                       GET /<id> -> the stored message (message/http); X-Id, X-Kind,
-                       X-Status, X-Method, X-Path, Last-Modified, X-Last, Link prev/next
-                       describe it, so HEAD /<id> is one line of ls
+                       GET /<id> -> the stored bytes as they are: message/http for
+                       a request or response, text/markdown for a note, text/plain
+                       for raw text, application/octet-stream for other bytes;
+                       X-Id, X-Kind, X-Status, X-Method, X-Path,
+                       Last-Modified, X-Last, Link prev/next describe it, so
+                       HEAD /<id> is one line of ls
                        GET /?q=<expr>, GET /tags[/<name>], GET /stats -> same as the CLI
                        GET / and HEAD / carry X-Last: <highest id> (the log tail)
 
@@ -804,11 +921,9 @@ db: --db PATH, or CURLDB_PATH, else ./curldb.sqlite
 def cli(argv: list[str] | None = None) -> None:
     args = list(argv if argv is not None else sys.argv[1:])
 
-    # Envelopes are UTF-8 regardless of the console's locale (Windows
+    # Listings are UTF-8 regardless of the console's locale (Windows
     # consoles default to a legacy code page and would mangle CJK).
-    # Preserve input line endings too: raw envelopes are archival data.
-    if hasattr(sys.stdin, "reconfigure"):
-        sys.stdin.reconfigure(encoding="utf-8", errors="replace", newline="")
+    # Records themselves go in and out through the binary streams.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -829,14 +944,14 @@ def cli(argv: list[str] | None = None) -> None:
         source = None
         if rest and rest[0] != "-":
             source = rest[0]
-            with open(source, encoding="utf-8", newline="") as f:
-                raw = f.read()
+            with open(source, "rb") as f:
+                data = f.read()
         else:
-            raw = sys.stdin.read()
-        if not raw.strip():
+            data = sys.stdin.buffer.read()
+        if not data.strip():
             _die("empty input")
-        rid = add(raw, source_path=source)
-        p = parse_envelope(raw, source)
+        rid = add(data, source_path=source)
+        p = parse_envelope(data, source)
         label = (p["status"] if p["kind"] == "response"
                  else f"{p['method']} {p['path']}" if p["kind"] == "request"
                  else f"{p['kind']} {p['path'] or ''}".rstrip())
@@ -855,7 +970,7 @@ def cli(argv: list[str] | None = None) -> None:
                 i += 2
             else:
                 _die(f"unexpected argument: {rest[i]}")
-        body = sys.stdin.read()
+        body = sys.stdin.buffer.read()
         _write_raw(wrap(start, body, hdrs))
 
     elif cmd in ("get", "export"):

@@ -95,7 +95,7 @@ class TemporaryDatabase(unittest.TestCase):
 class DatabaseTests(TemporaryDatabase):
     def test_raw_roundtrip_and_timestamp(self):
         rid = curldb.add(RAW, ts=123.0)
-        self.assertEqual(curldb.get(rid), RAW)
+        self.assertEqual(curldb.get(rid), RAW.encode("utf-8"))
         self.assertEqual(curldb.ls()[0]["ts"], 123.0)
         self.assertIsNone(curldb.get(rid + 1))
 
@@ -155,7 +155,7 @@ class DatabaseTests(TemporaryDatabase):
             conn.commit()
         finally:
             conn.close()
-        self.assertEqual(curldb.get(1), RAW)
+        self.assertEqual(curldb.get(1), RAW.encode("utf-8"))
         self.assertEqual(curldb.query("status=409 header:X-Scope=design")[0]["ts"], 123.0)
         self.assertEqual(curldb.stats()["count"], 1)
 
@@ -165,7 +165,7 @@ class DatabaseTests(TemporaryDatabase):
         self.assertEqual([r["id"] for r in curldb.ls(1)], [second])
         with patch.dict(os.environ, {"CURLDB_PATH": str(self.directory / "other.sqlite")}):
             self.assertEqual(curldb.ls(), [])
-        self.assertEqual(curldb.get(first), "first")
+        self.assertEqual(curldb.get(first), b"first")
 
 
 class CLITests(TemporaryDatabase):
@@ -177,6 +177,20 @@ class CLITests(TemporaryDatabase):
         if check:
             self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
         return result
+
+    def test_add_get_and_wrap_roundtrip_bytes(self):
+        png = b"\x89PNG\r\n\x1a\n\x00\x00\xff\xfe"
+        self.assertEqual(self.cli("add", data=png).stdout.strip(), b"#1 raw +0 headers")
+        self.assertEqual(self.cli("get", "1").stdout, png)
+        path = Path(self.directory) / "shot.png"
+        path.write_bytes(png)
+        self.assertTrue(self.cli("add", str(path)).stdout.startswith(b"#2 raw "))
+        self.assertEqual(self.cli("get", "2").stdout, png)
+        wrapped = self.cli("wrap", "POST /shot.png", "-H", "Content-Type:image/png", data=png).stdout
+        self.assertTrue(wrapped.startswith(b"POST /shot.png HTTP/1.1\n"))
+        self.assertTrue(wrapped.endswith(b"\n\n" + png))
+        self.assertEqual(self.cli("add", data=wrapped).stdout.strip(), b"#3 POST /shot.png +2 headers")
+        self.assertEqual(self.cli("get", "3").stdout, wrapped)
 
     def test_stdin_and_file_roundtrip_preserve_utf8_and_line_endings(self):
         for ending in ("\n", "\r\n", "\r"):
@@ -296,6 +310,102 @@ class HTTPTests(TemporaryDatabase):
                 self.assertEqual(headers["Content-Type"], head_headers["Content-Type"])
         self.assertIn(b"design(1)", self.request("GET", "/tags/X-Scope")[2])
 
+    def test_binary_bodies_are_stored_as_bytes(self):
+        png = b"\x89PNG\r\n\x1a\n\x00\x00\xff\xfe"
+        status, headers, _ = self.request("POST", "/shot.png", png, {"Content-Type": "image/png"})
+        self.assertEqual(status, 201)
+        rid = int(headers["Location"].lstrip("/"))
+        status, got, body = self.request("GET", headers["Location"])
+        self.assertEqual((status, got["Content-Type"], got["X-Kind"]), (200, "message/http", "request"))
+        self.assertTrue(body.startswith(b"POST /shot.png HTTP/1.1\n"))
+        self.assertTrue(body.endswith(b"\n\n" + png))
+        self.assertEqual(curldb.query("header:Content-Type=image/png")[0]["id"], rid)
+        self.assertEqual(curldb.query("method=POST")[0]["preview"], "")
+        message = b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n\r\n" + png
+        status, headers, _ = self.request("POST", "/", message, {"Content-Type": "message/http"})
+        self.assertEqual(status, 201)
+        status, got, body = self.request("GET", headers["Location"])
+        self.assertEqual((got["X-Kind"], got["X-Status"], body), ("response", "200", message))
+        rid = curldb.add(png, source_path="shot.png")
+        status, got, body = self.request("GET", f"/{rid}")
+        self.assertEqual((got["Content-Type"], got["X-Kind"], body), ("application/octet-stream", "raw", png))
+        # Low bytes are valid UTF-8; the NUL rule keeps them out of the index.
+        low = b"\x00\x01\x02"
+        status, headers, _ = self.request("POST", "/blob", low, {"Content-Type": "application/octet-stream"})
+        self.assertEqual(curldb.query("path=/blob")[0]["preview"], "")
+        self.assertEqual(self.request("GET", headers["Location"])[2].endswith(b"\n\n" + low), True)
+        self.assertEqual(curldb.stats()["count"], 4)
+
+    def test_chunked_bodies_are_joined_and_other_codings_refused(self):
+        import socket
+        png = b"\x89PNG\r\n\x1a\n\x00\x00\xff\xfe"
+        wire = (b"POST /shot.png HTTP/1.1\r\nHost: t\r\nContent-Type: image/png\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\n"
+                b"3\r\n" + png[:3] + b"\r\n" + b"%x\r\n" % (len(png) - 3) + png[3:] + b"\r\n0\r\n\r\n")
+        with socket.create_connection(self.server.server_address, timeout=5) as s:
+            s.sendall(wire)
+            reply = s.recv(4096)
+        self.assertTrue(reply.startswith(b"HTTP/1.0 201"), reply)
+        rid = curldb.last_id()
+        status, got, body = self.request("GET", f"/{rid}")
+        head, _, stored = body.partition(b"\n\n")
+        self.assertEqual(stored, png)
+        self.assertIn(b"\nContent-Length: %d\n" % len(png), head + b"\n")
+        self.assertNotIn(b"Transfer-Encoding", head)
+        self.assertEqual(curldb.query("header:Content-Type=image/png")[0]["id"], rid)
+        status, _, data = self.request("POST", "/x", b"abc", {"Transfer-Encoding": "gzip"})
+        self.assertEqual(status, 501)
+        self.assertEqual(curldb.stats()["count"], 1)
+
+    def _raw_exchange(self, wire: bytes) -> bytes:
+        import socket
+        with socket.create_connection(self.server.server_address, timeout=5) as s:
+            s.sendall(wire)
+            s.shutdown(socket.SHUT_WR)
+            reply = b""
+            while True:
+                part = s.recv(4096)
+                if not part:
+                    return reply
+                reply += part
+
+    def test_truncated_chunked_bodies_are_refused(self):
+        head = b"POST /x HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n"
+        cases = {
+            "short chunk": b"5\r\nabc",
+            "no terminator": b"3\r\nabc",
+            "no last chunk": b"3\r\nabc\r\n",
+            "bad size": b"zz\r\nabc\r\n0\r\n\r\n",
+            "chunk followed by data": b"3\r\nabcd\r\n0\r\n\r\n",
+        }
+        for name, tail in cases.items():
+            with self.subTest(name=name):
+                reply = self._raw_exchange(head + tail)
+                self.assertTrue(reply.startswith(b"HTTP/1.0 400"), (name, reply))
+                self.assertIn(b"incomplete chunked body", reply)
+        self.assertEqual(curldb.stats()["count"], 0)
+
+    def test_short_content_length_bodies_are_refused(self):
+        head = b"POST /x HTTP/1.1\r\nHost: t\r\n"
+        reply = self._raw_exchange(head + b"Content-Length: 5\r\n\r\nabc")
+        self.assertTrue(reply.startswith(b"HTTP/1.0 400"), reply)
+        self.assertIn(b"body ended after 3 of 5 bytes", reply)
+        reply = self._raw_exchange(head + b"Content-Length: five\r\n\r\nabc")
+        self.assertTrue(reply.startswith(b"HTTP/1.0 400"), reply)
+        self.assertEqual(curldb.stats()["count"], 0)
+
+    def test_chunked_with_content_length_stores_one_true_length(self):
+        wire = (b"POST /x HTTP/1.1\r\nHost: t\r\nContent-Length: 999\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n")
+        reply = self._raw_exchange(wire)
+        self.assertTrue(reply.startswith(b"HTTP/1.0 201"), reply)
+        stored = curldb.get(curldb.last_id())
+        head, _, body = stored.partition(b"\n\n")
+        self.assertEqual(body, b"abc")
+        self.assertEqual(head.count(b"Content-Length:"), 1)
+        self.assertIn(b"\nContent-Length: 3", head)
+        self.assertNotIn(b"999", head)
+
     def test_message_http_body_is_stored_as_itself(self):
         body = RAW.encode("utf-8")
         status, headers, _ = self.request("POST", "/anything", body, {"Content-Type": "message/http"})
@@ -332,6 +442,20 @@ class HTTPTests(TemporaryDatabase):
         self.assertEqual(headers["X-Path"], "/notes/scope")
         self.assertNotIn("X-Status", headers)
         self.assertEqual(headers["Link"], f'</{first}>; rel="prev"')
+
+    def test_content_type_names_the_stored_text(self):
+        expected = {
+            curldb.add(RAW): "message/http",
+            curldb.add("GET /x HTTP/1.1\r\n\r\n"): "message/http",
+            curldb.add(NOTE, source_path="a.md"): "text/markdown; charset=utf-8",
+            curldb.add("just words"): "text/plain; charset=utf-8",
+        }
+        for rid, ctype in expected.items():
+            with self.subTest(rid=rid):
+                status, headers, body = self.request("GET", f"/{rid}")
+                self.assertEqual(status, 200)
+                self.assertEqual(headers["Content-Type"], ctype)
+                self.assertEqual(body, curldb.get(rid))
 
     def test_non_ascii_path_in_x_path_header(self):
         # X-Path carries the stored path as UTF-8 bytes; http.client hands

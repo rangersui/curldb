@@ -315,7 +315,7 @@ $ curldb tags
 <p>Each reply prints as usual and lands in curldb with a number. Nothing was parsed on the way in; the headers the model wrote are the index. Query by status, any header, or full text of the body.</p>
 
 <h2>A post office</h2>
-<p>A post office takes anything with an address on it, keeps the envelope with the letter, does not open the letter, and stamps a number on the way in. That is the whole of curldb. What sits in the file is not a record about a request; it is the request as text, envelope and all. Same for a response.</p>
+<p>A post office takes anything with an address on it, keeps the envelope with the letter, does not open the letter, and stamps a number on the way in. That is the whole of curldb. What sits in the file is not a record about a request; it is the request itself, envelope and all. Same for a response.</p>
 <p>Because the stored thing is the message itself, it can be sent again. A stored request goes back out on the wire as a request:</p>
 <pre><code><span class="p">$</span> curl -s localhost:200/1 | nc example.com 80</code></pre>
 <p>And the other direction: a message that already is a message goes in as itself. <code>Content-Type: message/http</code> tells the post office that the body is the letter, envelope included, so a response is filed as a response:</p>
@@ -333,7 +333,7 @@ Location: /3</code></pre>
   <div><dt>One session, one file</dt><dd>The file name is the session. Backup is <code>cp</code>. Searching across sessions is querying each file in turn.</dd></div>
   <div><dt>Headers are tags</dt><dd>No schema. <code>X-Verdict: shaky</code> is unreadable to a program and obvious to a model, so an unknown header is fine. <code>curldb tags</code> lists what exists; the vocabulary grows out of the data.</dd></div>
   <div><dt>The body is never touched</dt><dd>Whoever adds headers, you, the model, an annotating model, a hook, adds headers only. Annotators sign with <code>Via:</code>.</dd></div>
-  <div><dt>The server is a cabinet</dt><dd>Every stored message gets a number; a POST answers with it in <code>Location</code>. <code>GET /2</code> returns message 2 exactly as it was stored, as <code>message/http</code>. A stored reply is data; it is never replayed as the server's own answer. Localhost, no token, one CLI.</dd></div>
+  <div><dt>The server is a cabinet</dt><dd>Every stored message gets a number; a POST answers with it in <code>Location</code>. <code>GET /2</code> returns message 2 exactly as it was stored; <code>Content-Type</code> says what it is: <code>message/http</code> for a request or response, <code>text/markdown</code> for a note. A stored reply is data; it is never replayed as the server's own answer. Localhost, no token, one CLI.</dd></div>
 </dl>
 
 <h2>Where the messages come from</h2>
@@ -412,7 +412,7 @@ $ curldb tags
 <p>每条回答照常打印出来,同时进了 curldb,拿到一个编号。进去的路上什么都没解析,模型自己写的 header 就是索引。按 status、任意 header、body 全文查。</p>
 
 <h2>一个邮局</h2>
-<p>邮局做的事:收下任何写了地址的东西,信封和信一起留着,不拆信,进门时盖个编号。curldb 全部就是这个。文件里躺着的不是「关于某个请求的记录」,是那个请求的文本,连信封带内容。response 也一样。</p>
+<p>邮局做的事:收下任何写了地址的东西,信封和信一起留着,不拆信,进门时盖个编号。curldb 全部就是这个。文件里躺着的不是「关于某个请求的记录」,是那个请求本身,连信封带内容。response 也一样。</p>
 <p>存的既然是消息本身,就能再寄一次。一条存下来的请求,原样推回线上就还是一条请求:</p>
 <pre><code><span class="p">$</span> curl -s localhost:200/1 | nc example.com 80</code></pre>
 <p>反过来也一样:本身已经是消息的东西,按原样进。<code>Content-Type: message/http</code> 告诉邮局 body 就是那封信,连信封在内,所以一条 response 存进去还是 response:</p>
@@ -430,7 +430,7 @@ Location: /3</code></pre>
   <div><dt>一个 session 一个文件</dt><dd>文件名就是 session。备份是 <code>cp</code>。跨 session 查就是对每个文件各查一遍。</dd></div>
   <div><dt>header 是 tag</dt><dd>没有 schema。<code>X-Verdict: shaky</code> 程序读不懂,模型一看就懂,所以没见过的 header 也没关系。<code>curldb tags</code> 列出库里有什么,词表从数据里长出来。</dd></div>
   <div><dt>body 永远原样</dt><dd>加 header 的人,你、模型、标注模型、hook,只加 header。标注者用 <code>Via:</code> 留名。</dd></div>
-  <div><dt>server 是档案柜</dt><dd>每条存进去的消息有一个编号,POST 的回复在 <code>Location</code> 里告诉你。<code>GET /2</code> 取回第 2 条,和存进去时一个字节不差,类型是 <code>message/http</code>。存的回答是数据,永远不当 server 自己的回答回放。只绑 localhost,没有 token,一个 CLI。</dd></div>
+  <div><dt>server 是档案柜</dt><dd>每条存进去的消息有一个编号,POST 的回复在 <code>Location</code> 里告诉你。<code>GET /2</code> 取回第 2 条,和存进去时一样;<code>Content-Type</code> 说明它是什么:request 和 response 是 <code>message/http</code>,note 是 <code>text/markdown</code>。存的回答是数据,永远不当 server 自己的回答回放。只绑 localhost,没有 token,一个 CLI。</dd></div>
 </dl>
 
 <h2>消息从哪来</h2>

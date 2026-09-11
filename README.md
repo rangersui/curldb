@@ -106,14 +106,14 @@ curldb query 'header:tags=iot'
 POST /<anything>     stored as received (request line, all headers, body), 201 + Location: /<id>
 POST /  + Content-Type: message/http
                      the body is the record: a response or a request stored as itself, no outer envelope
-GET  /<id>           the whole stored message, Content-Type: message/http
+GET  /<id>           the stored bytes as they are; Content-Type says what they are
 HEAD /<id>           the headers alone
 GET  /?q=<expr>      same as curldb query
 GET  /tags[/<name>]  same as curldb tags
 GET  /stats          same as curldb stats
 ```
 
-The headers of `GET /<id>` describe the stored message, the body is the message: `X-Id`, `X-Kind`, `X-Status` or `X-Method`, `X-Path`, `Last-Modified` (when it was stored), `X-Last` (the tail), and `Link` with `rel="prev"` and `rel="next"`. `HEAD /<id>` is one line of `curldb ls` in header form.
+The body of `GET /<id>` is the raw column, and `Content-Type` names it: `message/http` for a request or response, `text/markdown` for a note, `text/plain` for raw text, `application/octet-stream` for raw bytes that are not text. The other headers describe the record: `X-Id`, `X-Kind`, `X-Status` or `X-Method`, `X-Path`, `Last-Modified` (when it was stored), `X-Last` (the tail), and `Link` with `rel="prev"` and `rel="next"`. `HEAD /<id>` is one line of `curldb ls` in header form.
 
 `GET /` and `HEAD /` answer with `X-Last: <highest id>`. Ids are never reused, so that number is both the record count and the tail of the log; a consumer polls `HEAD /` and reads `/<n>` from where it left off.
 
@@ -130,13 +130,13 @@ The default port is 200. Ports below 1024 need root on Linux/macOS; `curldb serv
 
 An AI can curl straight in. A reply that already is an HTTP message (a Codex review starting with `HTTP/1.1 409 Conflict`, or a message read back from another curldb) is stored as itself by sending it with `Content-Type: message/http`; that is `curldb add` over the wire. The same message sent as an ordinary POST body would be stored one envelope deeper, as that POST.
 
-Records are UTF-8 text. A `message/http` body is stored as sent, line endings included. An ordinary POST or PUT is rebuilt from the parsed request with LF line endings, and any bytes outside UTF-8 become U+FFFD.
+A record is bytes. A `message/http` body is stored as sent, line endings included. An ordinary POST or PUT is rebuilt from the parsed request line and headers with LF line endings, followed by the body bytes as they arrived. The index and the full-text search cover the parts that are UTF-8 text: the start line, the headers, and a text body. A binary body (an image, an archive; anything that is not UTF-8 or contains a NUL byte) is stored and returned as it came in and has an empty preview. A chunked body is joined and stored with a `Content-Length` header in place of `Transfer-Encoding`, so the stored message is complete on its own.
 
 Bound to localhost, no token. The trust model is the CLI's: whoever can run curl on this machine.
 
 ### Reading a file in the browser
 
-[curldb.ai/viewer.html](https://curldb.ai/viewer.html) (also `docs/viewer.html` in the repo) opens a session file dropped onto it: same query language, a tag panel, one record at a time with its raw envelope. SQLite runs in the tab as WebAssembly; the file never leaves the machine and `serve` is not involved. `serve` stays curl-only and sends no CORS headers, so no web page can read the archive through it.
+[curldb.ai/viewer.html](https://curldb.ai/viewer.html) (also `docs/viewer.html` in the repo) opens a session file dropped onto it: same query language, a tag panel, one record at a time with its raw envelope. Three panes, mail-client style: tags, list, reading pane; each side folds, the reading pane can take the full width, and the widths drag. Keys: `j`/`k` move, `Enter` opens, `Esc` closes, `/` searches, `[` and `]` fold the side panes, `f` is full width. A body is shown by the `Content-Type` the message itself carries: images, audio, video and PDF render; HTML renders in a sandboxed frame with no scripts and no network; JSON is pretty-printed; markdown, CSV, diffs, form data, nested `message/http` and multipart parts render as what they are; everything else is text, and bytes that are not text get a hex dump. `source` shows the record as stored, `save raw` downloads the record bytes, `save body` the body alone. SQLite runs in the tab as WebAssembly; the file never leaves the machine and `serve` is not involved. `serve` stays curl-only and sends no CORS headers, so no web page can read the archive through it.
 
 ## Querying afterwards
 
@@ -348,14 +348,14 @@ curldb query 'header:tags=iot'
 POST /<anything>     收到什么存什么(请求行、所有 header、body),201 + Location: /<id>
 POST /  + Content-Type: message/http
                      body 本身就是记录:一条 response 或 request 按它本来的样子存,不套外层
-GET  /<id>           整条存的消息,Content-Type: message/http
+GET  /<id>           存的字节原样,Content-Type 说明它是什么
 HEAD /<id>           只要 header
 GET  /?q=<expr>      同 curldb query
 GET  /tags[/<name>]  同 curldb tags
 GET  /stats          同 curldb stats
 ```
 
-`GET /<id>` 的 header 描述这条记录,body 是记录本身:`X-Id`、`X-Kind`、`X-Status` 或 `X-Method`、`X-Path`、`Last-Modified`(存入时间)、`X-Last`(尾巴)、`Link` 的 `rel="prev"` 和 `rel="next"`。`HEAD /<id>` 就是 `curldb ls` 里的一行,换成 header 的样子。
+`GET /<id>` 的 body 是 raw 列,`Content-Type` 说明它是什么:request 和 response 是 `message/http`,note 是 `text/markdown`,raw 是 `text/plain`,不是文本的 raw 字节是 `application/octet-stream`。其余 header 描述这条记录:`X-Id`、`X-Kind`、`X-Status` 或 `X-Method`、`X-Path`、`Last-Modified`(存入时间)、`X-Last`(尾巴)、`Link` 的 `rel="prev"` 和 `rel="next"`。`HEAD /<id>` 就是 `curldb ls` 里的一行,换成 header 的样子。
 
 `GET /` 和 `HEAD /` 带 `X-Last: <最大编号>`。编号不复用,所以这个数既是记录总数也是日志的尾巴;消费者 `HEAD /` 看尾巴动没动,从自己记住的位置往后 `GET /<n>`。
 
@@ -372,13 +372,13 @@ curl 'localhost:200/?q=status=409'
 
 AI 可以直接 curl 进来。本身已经是 HTTP 消息的东西(以 `HTTP/1.1 409 Conflict` 开头的 Codex review,或者从另一个 curldb 读出来的一条消息)带上 `Content-Type: message/http` 发过来,就按它本来的样子存,这是 HTTP 版的 `curldb add`。同一条消息当普通 POST body 发,会多套一层,存的是那个 POST。
 
-记录是 UTF-8 文本。`message/http` 的 body 照发来的样子存,换行也保留。普通 POST/PUT 从解析后的请求重建,换行用 LF,UTF-8 以外的字节变成 U+FFFD。
+记录是字节。`message/http` 的 body 照发来的样子存,换行也保留。普通 POST/PUT 的请求行和 header 从解析结果重建,换行用 LF,后面接 body 的原始字节。索引和全文搜索覆盖其中是 UTF-8 文本的部分:起始行、header、文本 body。二进制 body(图片、压缩包,凡是不是 UTF-8 或含 NUL 字节的)原样存原样取,预览为空。chunked 的 body 拼起来存,`Transfer-Encoding` 换成 `Content-Length`,存下来的消息自己就是完整的。
 
 只绑 localhost,没有 token:信任模型和 CLI 一样,能在这台机器上跑 curl 的人。
 
 ### 在浏览器里看一个文件
 
-[curldb.ai/viewer.html](https://curldb.ai/viewer.html)(仓库里是 `docs/viewer.html`)把 session 文件拖进去就能看:同一套查询语法、tag 面板、逐条看原始信封。SQLite 以 WebAssembly 跑在标签页里,文件不离开这台机器,和 `serve` 无关。`serve` 只给 curl 用,不发 CORS 头,任何网页都读不到档案。
+[curldb.ai/viewer.html](https://curldb.ai/viewer.html)(仓库里是 `docs/viewer.html`)把 session 文件拖进去就能看:同一套查询语法、tag 面板、逐条看原始信封。三栏,邮件客户端的样子:tag、列表、阅读窗;两边都能收起,阅读窗可以铺满,宽度可拖。按键:`j`/`k` 上下,`Enter` 打开,`Esc` 关闭,`/` 搜索,`[` 和 `]` 收放两侧,`f` 铺满。body 按消息自己带的 `Content-Type` 显示:图片、音频、视频、PDF 直接渲染;HTML 在 sandbox 的 iframe 里渲染,不跑脚本不联网;JSON 格式化;markdown、CSV、diff、表单、套在里面的 `message/http`、multipart 各按本来的样子渲染;其余当文本,不是文本的字节给十六进制。`source` 看存的原样,`save raw` 下载整条记录的字节,`save body` 只下载 body。SQLite 以 WebAssembly 跑在标签页里,文件不离开这台机器,和 `serve` 无关。`serve` 只给 curl 用,不发 CORS 头,任何网页都读不到档案。
 
 ## 事后查
 

@@ -18,6 +18,11 @@
     --ok: #1F7A4D;
     --warn: #A65A1E;
     --code-bg: #F3F4F1;
+    --key: #5B4A9E;
+    --str: #1F7A4D;
+    --num: #A65A1E;
+    --add-bg: #E4F3E9;
+    --del-bg: #F8E4E0;
     --serif: "Newsreader", "Noto Serif SC", "Source Han Serif SC", "Songti SC", "SimSun", Georgia, "Times New Roman", serif;
     --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
   }
@@ -25,11 +30,13 @@
     :root:not([data-theme="light"]) {
       --paper: #14161A; --ink: #E8E6E1; --muted: #9A9DA5; --rule: #2A2D33;
       --ok: #62C08F; --warn: #E0955A; --code-bg: #1C1F24;
+      --key: #B3A5EE; --str: #62C08F; --num: #E0955A; --add-bg: #1B2E22; --del-bg: #33201C;
     }
   }
   :root[data-theme="dark"] {
     --paper: #14161A; --ink: #E8E6E1; --muted: #9A9DA5; --rule: #2A2D33;
     --ok: #62C08F; --warn: #E0955A; --code-bg: #1C1F24;
+    --key: #B3A5EE; --str: #62C08F; --num: #E0955A; --add-bg: #1B2E22; --del-bg: #33201C;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -40,10 +47,16 @@
   }
   a { color: inherit; }
   :focus-visible { outline: 2px solid var(--ok); outline-offset: 2px; }
+  button.plain {
+    font: inherit; font-family: var(--mono); font-size: 0.8rem; background: none; border: 1px solid var(--rule);
+    color: var(--muted); cursor: pointer; padding: 0.1rem 0.5rem; border-radius: 3px;
+  }
+  button.plain:hover { color: var(--ink); border-color: var(--ink); }
+  button.plain.on { color: var(--paper); background: var(--ink); border-color: var(--ink); }
 
   header {
-    display: flex; align-items: baseline; gap: 1.5rem; flex-wrap: wrap;
-    padding: 1rem 1.5rem; border-bottom: 1px solid var(--rule);
+    display: flex; align-items: baseline; gap: 1.25rem; flex-wrap: wrap;
+    padding: 0.8rem 1.5rem; border-bottom: 1px solid var(--rule);
   }
   header .brand { font-family: var(--mono); font-size: 0.95rem; }
   header .file { color: var(--muted); font-size: 0.95rem; flex: 1; min-width: 12rem; }
@@ -52,10 +65,12 @@
     font-size: 0.9rem; text-decoration: underline; text-underline-offset: 0.2em; cursor: pointer;
   }
   header input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
-  header button.pick { font: inherit; font-family: var(--serif); background: none; border: 0; padding: 0; color: var(--ink); }
+  header button.pick { font: inherit; font-family: var(--serif); background: none; border: 0; padding: 0; color: var(--ink); text-decoration: underline; text-underline-offset: 0.2em; cursor: pointer; }
   header .mode { font-family: var(--mono); font-size: 0.78rem; color: var(--muted); }
   header .mode.live { color: var(--ok); }
-  header .mode.live::before { content: "CF "; }
+  header .mode.live::before { content: "CF "; }
+  header .panes { display: none; gap: 0.35rem; }
+  header .panes.on { display: flex; }
 
   .drop {
     flex: 1; display: flex; align-items: center; justify-content: center;
@@ -68,8 +83,14 @@
   .drop code { font-family: var(--mono); font-size: 0.9em; background: var(--code-bg); padding: 0.08em 0.35em; }
   .drop button.pick { font: inherit; background: none; border: 0; padding: 0; color: var(--ink); text-decoration: underline; text-underline-offset: 0.2em; cursor: pointer; }
 
+  /* Three panes, mail-client style: tags | list | reading pane. Each side
+     collapses; the reading pane can also take the whole width. */
   .app { flex: 1; display: none; min-height: 0; }
-  .app.on { display: grid; grid-template-columns: var(--side, 17rem) 6px 1fr; }
+  .app.on { display: grid; grid-template-columns: var(--side, 17rem) 6px minmax(0, 1fr); }
+  /* A hidden pane leaves the grid, so the template shrinks to the panes
+     that remain; otherwise the next item would land in the empty column. */
+  .app.on.no-side { grid-template-columns: minmax(0, 1fr); }
+  .app.no-side aside, .app.no-side #gutter { display: none; }
   .gutter { cursor: col-resize; background: transparent; }
   .gutter:hover, .gutter.drag { background: var(--rule); }
   @media (max-width: 52rem) { .app.on { grid-template-columns: 1fr; } aside { max-height: 14rem; } .gutter { display: none; } }
@@ -78,30 +99,38 @@
     border-right: 1px solid var(--rule); overflow: auto; padding: 1rem 1.25rem; min-width: 0;
     font-size: 0.9rem; scrollbar-width: none;
   }
-  aside h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 0.6rem; font-weight: 500; }
+  aside h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 0.6rem; font-weight: 500; display: flex; align-items: baseline; gap: 0.5rem; }
+  aside h2 .fold { margin-left: auto; font-family: var(--mono); font-size: 0.75rem; text-transform: none; letter-spacing: 0; cursor: pointer; background: none; border: 0; color: var(--muted); padding: 0; }
+  aside h2 .fold:hover { color: var(--ink); }
   aside .tag { margin: 0 0 0.75rem; }
   aside .tag .name { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); }
-  aside button {
+  aside button.t {
     font: inherit; font-family: var(--serif); background: none; border: 0; padding: 0 0.15rem;
     color: var(--ink); cursor: pointer; text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 0.2em;
   }
-  aside button:hover { text-decoration-color: var(--ink); }
-  aside button.active { background: var(--ink); color: var(--paper); text-decoration: none; padding: 0 0.3rem; }
+  aside button.t:hover { text-decoration-color: var(--ink); }
+  aside button.t.active { background: var(--ink); color: var(--paper); text-decoration: none; padding: 0 0.3rem; }
   aside .n { color: var(--muted); font-variant-numeric: tabular-nums; }
   aside .kinds { margin-bottom: 1.25rem; }
 
-  main { display: flex; flex-direction: column; min-height: 0; }
-  .query { padding: 1rem 1.5rem; border-bottom: 1px solid var(--rule); display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+  main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  .query { padding: 0.8rem 1.5rem; border-bottom: 1px solid var(--rule); display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
   .query input {
     flex: 1; min-width: 16rem; font: inherit; font-family: var(--mono); font-size: 0.9rem;
     background: var(--code-bg); color: var(--ink); border: 1px solid var(--rule); padding: 0.5rem 0.7rem;
   }
   .query .count { color: var(--muted); font-size: 0.9rem; font-variant-numeric: tabular-nums; }
-  .query .hint { width: 100%; color: var(--muted); font-size: 0.85rem; font-family: var(--mono); }
+  .query .hint { width: 100%; color: var(--muted); font-size: 0.8rem; font-family: var(--mono); display: flex; gap: 1.5rem; flex-wrap: wrap; }
+  .query .hint .keys { margin-left: auto; }
 
-  .split { flex: 1; display: grid; grid-template-columns: minmax(20rem, 1fr) minmax(20rem, 1.2fr); min-height: 0; }
-  @media (max-width: 64rem) { .split { grid-template-columns: 1fr; } .list { max-height: 40vh; } }
-  .list { overflow: auto; border-right: 1px solid var(--rule); scrollbar-width: none; }
+  .split { flex: 1; display: grid; grid-template-columns: minmax(16rem, var(--listw, 42%)) 6px minmax(0, 1fr); min-height: 0; }
+  .split.no-detail { grid-template-columns: minmax(0, 1fr); }
+  .split.no-detail .detail, .split.no-detail #gutter2 { display: none; }
+  .split.focus { grid-template-columns: minmax(0, 1fr); }
+  .split.focus .list, .split.focus #gutter2 { display: none; }
+  @media (max-width: 64rem) { .split { grid-template-columns: 1fr; } .list { max-height: 40vh; } #gutter2 { display: none; } .split.no-detail, .split.focus { grid-template-columns: 1fr; } }
+  .list { overflow: auto; border-right: 1px solid var(--rule); scrollbar-width: none; min-width: 0; }
+  .day { padding: 0.35rem 1.5rem 0.2rem; font-family: var(--mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); border-bottom: 1px solid var(--rule); background: var(--paper); position: sticky; top: 0; }
   .row {
     display: grid; grid-template-columns: 3.5rem 5.5rem 1fr; gap: 0.75rem; align-items: baseline;
     padding: 0.55rem 1.5rem; border-bottom: 1px solid var(--rule); cursor: pointer;
@@ -113,11 +142,11 @@
   .row .label { font-family: var(--mono); font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .row .label.ok { color: var(--ok); }
   .row .label.err { color: var(--warn); }
-  .row .preview { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .preview { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .row .ts { grid-column: 2 / 4; color: var(--muted); font-size: 0.78rem; font-family: var(--mono); }
   .empty { padding: 2rem 1.5rem; color: var(--muted); }
 
-  .detail { overflow: auto; scrollbar-width: none; }
+  .detail { overflow: auto; scrollbar-width: none; min-width: 0; }
   .detail pre {
     margin: 0; padding: 1.25rem 1.5rem; font-family: var(--mono); font-size: 0.85rem; line-height: 1.55;
     white-space: pre-wrap; overflow-wrap: anywhere;
@@ -125,10 +154,56 @@
   .detail pre .start { color: var(--ok); }
   .detail pre .start.err { color: var(--warn); }
   .detail pre .hn { color: var(--muted); }
-  .detail .meta { padding: 0.75rem 1.5rem; border-bottom: 1px solid var(--rule); color: var(--muted); font-size: 0.85rem; font-family: var(--mono); display: flex; gap: 1.5rem; flex-wrap: wrap; }
-  .detail .meta button { font: inherit; background: none; border: 0; color: var(--muted); text-decoration: underline; cursor: pointer; padding: 0; }
-  .detail .meta button:hover { color: var(--ok); }
+  .detail .meta { padding: 0.6rem 1.5rem; border-bottom: 1px solid var(--rule); color: var(--muted); font-size: 0.82rem; font-family: var(--mono); display: flex; gap: 1rem; flex-wrap: wrap; align-items: baseline; }
+  .detail .meta.actions { gap: 0.5rem 1rem; }
+  .detail .meta .id { color: var(--ink); }
+  .detail .meta button, .detail .meta a { font: inherit; background: none; border: 0; color: var(--muted); text-decoration: underline; text-underline-offset: 0.2em; cursor: pointer; padding: 0; }
+  .detail .meta button:hover, .detail .meta a:hover { color: var(--ok); }
+  .detail .meta button.on { color: var(--ink); text-decoration: none; }
+  .detail .meta button:disabled { opacity: 0.4; cursor: default; text-decoration: none; }
+  .detail .meta .right { margin-left: auto; display: flex; gap: 1rem; }
   .err-box { padding: 1rem 1.5rem; color: var(--warn); font-family: var(--mono); font-size: 0.85rem; }
+  .detail .media { padding: 0.5rem 1.5rem 1.5rem; }
+  .detail .media img, .detail .media video { max-width: 100%; height: auto; display: block; }
+  .detail .media audio { width: 100%; }
+  .detail .media iframe { width: 100%; height: 60vh; border: 1px solid var(--rule); background: #fff; }
+  .detail .media embed { width: 100%; height: 70vh; border: 1px solid var(--rule); }
+  .detail .media .note { color: var(--muted); font-family: var(--mono); font-size: 0.85rem; }
+  .detail .media details { margin-top: 0.75rem; }
+  .detail .media summary { cursor: pointer; color: var(--muted); font-family: var(--mono); font-size: 0.8rem; }
+  .detail .media details pre { padding: 0.5rem 0 0; }
+  .detail .media pre { padding: 0; }
+  .detail .nested { margin: 0.5rem 0 0; border-left: 3px solid var(--rule); padding-left: 1rem; }
+  .detail .nested .media { padding: 0.5rem 0 0; }
+  .detail .part { margin: 0.75rem 0; border: 1px solid var(--rule); padding: 0.75rem 1rem; }
+  .detail .part .ph { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); margin-bottom: 0.4rem; }
+  .detail table { border-collapse: collapse; font-size: 0.85rem; max-width: 100%; }
+  .detail th, .detail td { border: 1px solid var(--rule); padding: 0.2rem 0.6rem; text-align: left; vertical-align: top; font-family: var(--mono); }
+  .detail th { color: var(--muted); font-weight: 500; }
+  .detail .tablewrap { overflow: auto; }
+  .detail .j-k { color: var(--key); }
+  .detail .j-s { color: var(--str); }
+  .detail .j-n { color: var(--num); }
+  .detail .d-add { background: var(--add-bg); display: block; }
+  .detail .d-del { background: var(--del-bg); display: block; }
+  .detail .d-hunk { color: var(--key); display: block; }
+  .detail .d-meta { color: var(--muted); display: block; }
+  .detail .hex { color: var(--muted); }
+  .detail .hex b { color: var(--ink); font-weight: 400; }
+  .detail .md { max-width: 46rem; }
+  .detail .md h1, .detail .md h2, .detail .md h3, .detail .md h4 { font-weight: 500; line-height: 1.25; margin: 1.2em 0 0.4em; }
+  .detail .md h1 { font-size: 1.6rem; } .detail .md h2 { font-size: 1.3rem; } .detail .md h3 { font-size: 1.1rem; } .detail .md h4 { font-size: 1rem; }
+  .detail .md p { margin: 0 0 0.8em; }
+  .detail .md pre { background: var(--code-bg); padding: 0.75rem 1rem; overflow: auto; font-size: 0.82rem; margin: 0 0 0.9em; }
+  .detail .md code { font-family: var(--mono); font-size: 0.88em; background: var(--code-bg); padding: 0.05em 0.3em; }
+  .detail .md pre code { background: none; padding: 0; }
+  .detail .md blockquote { margin: 0 0 0.8em; padding-left: 1rem; border-left: 3px solid var(--rule); color: var(--muted); }
+  .detail .md ul, .detail .md ol { margin: 0 0 0.8em; padding-left: 1.5rem; }
+  .detail .md hr { border: 0; border-top: 1px solid var(--rule); margin: 1.2em 0; }
+  .detail .md a { text-decoration: underline; text-underline-offset: 0.2em; }
+  .detail .md .img { color: var(--muted); font-family: var(--mono); font-size: 0.85em; }
+  .detail .md table { margin: 0 0 0.9em; }
+  .detail .md th, .detail .md td { font-family: inherit; }
   aside::-webkit-scrollbar, .list::-webkit-scrollbar, .detail::-webkit-scrollbar { display: none; }
 
   aside details { margin: 0 0 0.45rem; }
@@ -146,7 +221,6 @@
   aside details .vals { padding: 0.15rem 0 0.2rem 1.2em; }
   aside details .vals button { display: inline; }
   aside .more { color: var(--muted); font-size: 0.8rem; }
-
 </style>
 </head>
 <body>
@@ -155,6 +229,10 @@
   <span class="brand">curldb viewer</span>
   <span class="file" id="file-name">no file open</span>
   <span class="mode" id="mode" hidden></span>
+  <span class="panes" id="panes">
+    <button type="button" class="plain on" id="toggle-side" title="[  tags pane">tags</button>
+    <button type="button" class="plain on" id="toggle-detail" title="]  reading pane">reading pane</button>
+  </span>
   <button type="button" class="pick" id="pick-live" hidden>open a .sqlite (live)</button>
   <label class="pick">open a .sqlite<input type="file" id="file-input" accept=".sqlite,.db,.sqlite3"></label>
 </header>
@@ -176,10 +254,11 @@
     <div class="query">
       <input id="q" type="text" placeholder="status=200 header:X-Scope=design body~api" autocomplete="off" spellcheck="false">
       <span class="count" id="count"></span>
-      <span class="hint">kind=  status=  method=  path=  path~  header:Name  header:Name=value  body~word  word</span>
+      <span class="hint"><span>kind=  status=  method=  path=  path~  header:Name  header:Name=value  body~word  word</span><span class="keys">j/k move  Enter open  Esc close  / search  [ tags  ] reading pane  f full</span></span>
     </div>
-    <div class="split">
+    <div class="split" id="split">
       <div class="list" id="list"></div>
+      <div class="gutter" id="gutter2" title="drag to resize"></div>
       <div class="detail" id="detail"><div class="empty">Select a record.</div></div>
     </div>
   </main>
@@ -190,29 +269,48 @@
   var SQL = null, db = null, selected = null, displayedGeneration = null;
   function $(id) { return document.getElementById(id); }
 
-  // Sidebar width: drag the gutter; the value is kept in this browser.
-  (function () {
-    var app = $("app"), gutter = $("gutter");
-    try { var saved = localStorage.getItem("curldb-viewer-side"); if (saved) app.style.setProperty("--side", saved); } catch (e) {}
+  // ---- panes ----------------------------------------------------------
+  // Which panes are open is remembered in this browser. "focus" is the
+  // reading pane alone, full width.
+  var panes = { side: true, detail: true, focus: false };
+  try { var savedPanes = JSON.parse(localStorage.getItem("curldb-viewer-panes") || "null"); if (savedPanes) panes = savedPanes; } catch (e) {}
+  function applyPanes() {
+    $("app").classList.toggle("no-side", !panes.side);
+    $("split").classList.toggle("no-detail", !panes.detail);
+    $("split").classList.toggle("focus", panes.detail && panes.focus);
+    $("toggle-side").classList.toggle("on", panes.side);
+    $("toggle-detail").classList.toggle("on", panes.detail);
+    try { localStorage.setItem("curldb-viewer-panes", JSON.stringify(panes)); } catch (e) {}
+  }
+  function setPane(name, value) { panes[name] = value; if (name === "detail" && !value) panes.focus = false; applyPanes(); }
+  $("toggle-side").addEventListener("click", function () { setPane("side", !panes.side); });
+  $("toggle-detail").addEventListener("click", function () { setPane("detail", !panes.detail); });
+  applyPanes();
+
+  // Pane widths: drag a gutter; the value is kept in this browser.
+  function makeGutter(gutter, target, cssVar, storageKey, minPx, maxFrac) {
+    try { var saved = localStorage.getItem(storageKey); if (saved) target.style.setProperty(cssVar, saved); } catch (e) {}
     gutter.addEventListener("pointerdown", function (e) {
       e.preventDefault();
       gutter.classList.add("drag");
       gutter.setPointerCapture(e.pointerId);
-      var left = app.getBoundingClientRect().left;
+      var left = target.getBoundingClientRect().left;
       function move(ev) {
-        var w = Math.max(160, Math.min(ev.clientX - left, window.innerWidth * 0.6));
-        app.style.setProperty("--side", w + "px");
+        var w = Math.max(minPx, Math.min(ev.clientX - left, window.innerWidth * maxFrac));
+        target.style.setProperty(cssVar, w + "px");
       }
       function up() {
         gutter.classList.remove("drag");
         gutter.removeEventListener("pointermove", move);
         gutter.removeEventListener("pointerup", up);
-        try { localStorage.setItem("curldb-viewer-side", app.style.getPropertyValue("--side")); } catch (e) {}
+        try { localStorage.setItem(storageKey, target.style.getPropertyValue(cssVar)); } catch (e) {}
       }
       gutter.addEventListener("pointermove", move);
       gutter.addEventListener("pointerup", up);
     });
-  })();
+  }
+  makeGutter($("gutter"), $("app"), "--side", "curldb-viewer-side", 160, 0.6);
+  makeGutter($("gutter2"), $("split"), "--listw", "curldb-viewer-listw", 220, 0.8);
 
   // sql.js: SQLite compiled to WebAssembly, runs in this tab only.
   var ready = initSqlJs({
@@ -238,6 +336,7 @@
       var previous = db, previousSelected = selected;
       if (displayedGeneration !== generation) selected = null;
       db = fresh;
+      renderSeq++;   // any detail render still in flight belongs to the old file
       try {
         renderTags();
         if (!runQuery($("q").value)) throw new Error("could not query snapshot");
@@ -263,6 +362,7 @@
       m.textContent = mode === "live" ? "live" : "snapshot";
       $("drop").style.display = "none";
       $("app").classList.add("on");
+      $("panes").classList.add("on");
       $("load-state").textContent = "";
       return true;
     });
@@ -295,8 +395,8 @@
   }
 
   // Live mode: keep a handle from the picker and re-read the file whenever
-  // its size or mtime changes. curldb writers open and close per operation,
-  // so SQLite checkpoints the WAL on close and the main file stays current.
+  // its bytes change. curldb writers open and close per operation, so
+  // SQLite checkpoints the WAL on close and the main file stays current.
   // Compare bytes, not size/mtime: a SQLite write can leave the size
   // unchanged, and file metadata through a handle is not always fresh.
   function checksum(buffer) {
@@ -330,7 +430,7 @@
       $("mode").hidden = false;
       $("mode").textContent = "live read failed: " + e.message;
       $("mode").className = "mode";
-      // Retain the last good DB/hash and retry; a concurrent checkpoint can
+      // Keep the last good DB/hash and retry; a concurrent checkpoint can
       // produce a temporarily unreadable file. Never label that read success.
     }).then(function () { if (current()) live.timer = setTimeout(poll, 2000); });
   }
@@ -387,6 +487,15 @@
     var d = new Date(ts * 1000);
     return pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
   }
+  function dayOf(ts) {
+    var d = new Date(ts * 1000);
+    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+  }
+  function human(n) {
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    return (n / 1024 / 1024).toFixed(2) + " MB";
+  }
   function label(r) {
     if (r.kind === "response") return String(r.status);
     if (r.kind === "request") return r.method + " " + r.path;
@@ -399,22 +508,31 @@
     return "";
   }
 
+  // ---- tags pane ------------------------------------------------------
   function renderTags() {
     var kinds = rows("SELECT kind, count(*) AS n FROM records GROUP BY kind ORDER BY n DESC");
     var statuses = rows("SELECT status, count(*) AS n FROM records WHERE status IS NOT NULL GROUP BY status ORDER BY status");
+    var methods = rows("SELECT method, count(*) AS n FROM records WHERE method IS NOT NULL GROUP BY method ORDER BY n DESC");
     var hdrs = rows("SELECT name, value, count(*) AS n FROM headers GROUP BY name, value ORDER BY name, n DESC, value");
     var html = '<div class="kinds"><h2>records</h2>';
     kinds.forEach(function (k) {
-      html += '<div><button data-q="kind=' + esc(k.kind) + '">' + esc(k.kind) + '</button> <span class="n">' + k.n + "</span></div>";
+      html += '<div><button class="t" data-q="kind=' + esc(k.kind) + '">' + esc(k.kind) + '</button> <span class="n">' + k.n + "</span></div>";
     });
     if (statuses.length) {
       html += '<div style="margin-top:.5rem">';
       statuses.forEach(function (s) {
-        html += '<button data-q="status=' + s.status + '">' + s.status + '</button> <span class="n">' + s.n + "</span> &nbsp;";
+        html += '<button class="t" data-q="status=' + s.status + '">' + s.status + '</button> <span class="n">' + s.n + "</span> &nbsp;";
       });
       html += "</div>";
     }
-    html += "</div><h2>headers</h2>";
+    if (methods.length) {
+      html += '<div style="margin-top:.5rem">';
+      methods.forEach(function (m) {
+        html += '<button class="t" data-q="method=' + esc(m.method) + '">' + esc(m.method) + '</button> <span class="n">' + m.n + "</span> &nbsp;";
+      });
+      html += "</div>";
+    }
+    html += '</div><h2>headers <button type="button" class="fold" id="fold-all">fold all</button></h2>';
     var groups = Object.create(null), order = [];
     hdrs.forEach(function (h) {
       if (!groups[h.name]) { groups[h.name] = []; order.push(h.name); }
@@ -427,7 +545,7 @@
       html += "<details" + open + '><summary><span class="sum">' + esc(name) + '<span class="n">' + vals.length + (vals.length === 1 ? " value" : " values") + " / " + total + '</span></span></summary><div class="vals">';
       vals.slice(0, 60).forEach(function (h) {
         var q = "header:" + h.name + "=" + h.value;
-        html += '<button data-q="' + esc(q) + '">' + esc(h.value || "(empty)") + '</button><span class="n">' + h.n + "</span> ";
+        html += '<button class="t" data-q="' + esc(q) + '">' + esc(h.value || "(empty)") + '</button><span class="n">' + h.n + "</span> ";
       });
       if (vals.length > 60) html += '<span class="more">+' + (vals.length - 60) + " more</span>";
       html += "</div></details>";
@@ -437,6 +555,14 @@
   // Clicking a tag toggles it: present in the query -> removed, absent -> appended.
   function quoteTerm(term) { return /\s/.test(term) ? '"' + term + '"' : term; }
   $("tags").addEventListener("click", function (e) {
+    var fold = e.target.closest("#fold-all");
+    if (fold) {
+      var all = $("tags").querySelectorAll("details");
+      var anyOpen = Array.prototype.some.call(all, function (d) { return d.open; });
+      Array.prototype.forEach.call(all, function (d) { d.open = !anyOpen; });
+      fold.textContent = anyOpen ? "unfold all" : "fold all";
+      return;
+    }
     var b = e.target.closest("button[data-q]");
     if (!b) return;
     var q = $("q");
@@ -454,7 +580,8 @@
     });
   }
 
-  // Query DSL, same shape as the command line. Body search is LIKE here.
+  // ---- query ----------------------------------------------------------
+  // Same shape as the command line. Body search is LIKE here.
   function tokenize(expr) {
     var out = [], cur = "", inq = false;
     for (var i = 0; i < expr.length; i++) {
@@ -517,13 +644,17 @@
     catch (e) { list.innerHTML = '<div class="err-box">' + esc(e.message) + "</div>"; $("count").textContent = ""; return false; }
     $("count").textContent = result.length + (result.length === 500 ? "+" : "");
     if (!result.length) { list.innerHTML = '<div class="empty">(no matches)</div>'; return true; }
-    list.innerHTML = result.map(function (r) {
-      return '<div class="row' + (selected === r.id ? " sel" : "") + '" data-id="' + r.id + '">' +
+    var html = "", day = null;
+    result.forEach(function (r) {
+      var d = dayOf(r.ts);
+      if (d !== day) { day = d; html += '<div class="day">' + d + "</div>"; }
+      html += '<div class="row' + (selected === r.id ? " sel" : "") + '" data-id="' + r.id + '">' +
         '<span class="id">' + r.id + "</span>" +
         '<span class="label ' + labelClass(r) + '">' + esc(label(r)) + "</span>" +
         '<span class="preview">' + esc((r.preview || "").replace(/\s+/g, " ")) + "</span>" +
         '<span class="ts">' + tsShort(r.ts) + "</span></div>";
-    }).join("");
+    });
+    list.innerHTML = html;
     return true;
   }
   var timer = null;
@@ -531,44 +662,439 @@
     clearTimeout(timer);
     timer = setTimeout(function () { runQuery($("q").value); }, 120);
   });
+
+  // ---- selection and keys ----------------------------------------------
+  function rowIds() {
+    return Array.prototype.map.call($("list").querySelectorAll(".row[data-id]"), function (r) { return Number(r.getAttribute("data-id")); });
+  }
+  function selectRow(id) {
+    selected = id;
+    Array.prototype.forEach.call($("list").querySelectorAll(".row"), function (r) {
+      var on = Number(r.getAttribute("data-id")) === selected;
+      r.classList.toggle("sel", on);
+      if (on && r.scrollIntoView) r.scrollIntoView({ block: "nearest" });
+    });
+    if (!panes.detail) setPane("detail", true);
+    showRecord(selected);
+  }
+  function moveSelection(step) {
+    var ids = rowIds();
+    if (!ids.length) return;
+    var i = ids.indexOf(selected);
+    var next = i < 0 ? (step > 0 ? 0 : ids.length - 1) : Math.max(0, Math.min(ids.length - 1, i + step));
+    if (ids[next] !== selected) selectRow(ids[next]);
+  }
   $("list").addEventListener("click", function (e) {
     var row = e.target.closest(".row[data-id]");
     if (!row) return;
-    selected = Number(row.getAttribute("data-id"));
-    Array.prototype.forEach.call($("list").querySelectorAll(".row"), function (r) {
-      r.classList.toggle("sel", Number(r.getAttribute("data-id")) === selected);
-    });
-    showRecord(selected);
+    selectRow(Number(row.getAttribute("data-id")));
+  });
+  document.addEventListener("keydown", function (e) {
+    var t = e.target, typing = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA");
+    if (e.key === "Escape") {
+      if (typing) { t.blur(); return; }
+      if (panes.focus) setPane("focus", false);
+      else if (panes.detail) setPane("detail", false);
+      return;
+    }
+    if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === "/") { e.preventDefault(); $("q").focus(); $("q").select(); }
+    else if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); moveSelection(1); }
+    else if (e.key === "k" || e.key === "ArrowUp") { e.preventDefault(); moveSelection(-1); }
+    else if (e.key === "Enter" || e.key === "o") { if (selected !== null) selectRow(selected); }
+    else if (e.key === "[") setPane("side", !panes.side);
+    else if (e.key === "]") setPane("detail", !panes.detail);
+    else if (e.key === "f") { if (panes.detail) setPane("focus", !panes.focus); }
   });
 
+  // ---- record detail -------------------------------------------------
+  // A record is bytes. The head (start line and headers) is text; the body
+  // is shown by the Content-Type the message itself carries. Nothing here
+  // changes the bytes; "save raw" hands them over as stored.
+
+  function splitEnvelope(bytes) {
+    // Index of the first blank line, found on the bytes so lengths are exact.
+    // Returns [headEnd, bodyStart].
+    var n = bytes.length;
+    for (var i = 0; i + 1 < n; i++) {
+      if (bytes[i] === 10 && bytes[i + 1] === 10) return [i, i + 2];
+      if (bytes[i] === 13 && bytes[i + 1] === 10 && bytes[i + 2] === 13 && bytes[i + 3] === 10) return [i, i + 4];
+    }
+    return [n, n];
+  }
+
+  function isText(bytes) {
+    if (bytes.indexOf(0) >= 0) return false;
+    try { new TextDecoder("utf-8", { fatal: true }).decode(bytes); return true; } catch (e) { return false; }
+  }
+  function decode(bytes) { return new TextDecoder().decode(bytes); }
+
+  function startsWith(b, s, at) {
+    at = at || 0;
+    if (b.length < at + s.length) return false;
+    for (var i = 0; i < s.length; i++) if (b[at + i] !== s.charCodeAt(i)) return false;
+    return true;
+  }
+  function sniff(bytes) {
+    // Media type from the first bytes, for bodies whose message names none.
+    var b = bytes;
+    if (b.length < 4) return "";
+    if (b[0] === 0x89 && startsWith(b, "PNG", 1)) return "image/png";
+    if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
+    if (startsWith(b, "GIF8")) return "image/gif";
+    if (startsWith(b, "RIFF") && startsWith(b, "WEBP", 8)) return "image/webp";
+    if (startsWith(b, "RIFF") && startsWith(b, "WAVE", 8)) return "audio/wav";
+    if (startsWith(b, "%PDF")) return "application/pdf";
+    if (startsWith(b, "ID3")) return "audio/mpeg";
+    if (startsWith(b, "ftyp", 4)) return "video/mp4";
+    if (startsWith(b, "OggS")) return "audio/ogg";
+    if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return "video/webm";
+    if (startsWith(b, "PK") && b[2] === 3 && b[3] === 4) return "application/zip";
+    if (b[0] === 0x1f && b[1] === 0x8b) return "application/gzip";
+    if (startsWith(b, "SQLite format 3")) return "application/vnd.sqlite3";
+    if (isText(b)) {
+      var t = decode(b.slice(0, 512)).replace(/^\s+/, "");
+      if (/^<(!doctype html|html)/i.test(t)) return "text/html";
+      if (/^(<\?xml[^>]*>\s*)?<svg/i.test(t)) return "image/svg+xml";
+      if (t.charAt(0) === "<") return "text/xml";
+      if (t.charAt(0) === "{" || t.charAt(0) === "[") return "application/json";
+      if (/^(diff --git |--- .*\n\+\+\+ |Index: )/.test(t)) return "text/x-diff";
+      if (/^(HTTP\/\d(\.\d)? \d{3}|[A-Z]+ \S+ HTTP\/\d)/.test(t)) return "message/http";
+    }
+    return "";
+  }
+
+  var urls = [];
+  function blobUrl(bytes, type) {
+    var u = URL.createObjectURL(new Blob([bytes], { type: type }));
+    urls.push(u);
+    return u;
+  }
+
+  function inflate(bytes, encoding) {
+    // Content-Encoding gzip/deflate: the stored bytes are compressed; show
+    // them decompressed. Resolves null when there is nothing to do.
+    if ((encoding !== "gzip" && encoding !== "deflate") || typeof DecompressionStream === "undefined") return Promise.resolve(null);
+    return new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream(encoding))).arrayBuffer()
+      .then(function (buf) { return new Uint8Array(buf); })
+      .catch(function () { return null; });
+  }
+
+  // A stored HTML page is shown with no scripts (sandbox) and no network:
+  // the CSP meta at the top of the document allows inline styles and
+  // data: images only, so a page in the archive cannot call out.
+  var FRAME_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:";
+  function htmlFrame(html) {
+    var doc = '<meta http-equiv="Content-Security-Policy" content="' + FRAME_CSP + '">' + html;
+    return '<iframe sandbox referrerpolicy="no-referrer" srcdoc="' + esc(doc) + '"></iframe>';
+  }
+
+  // ---- text renderers (all output is escaped) ---------------------------
+  function prettyJson(text) {
+    var v;
+    try { v = JSON.parse(text); } catch (e) { return null; }
+    var out = JSON.stringify(v, null, 2);
+    if (out === undefined) return null;
+    var re = /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+    var html = "", last = 0, m;
+    while ((m = re.exec(out))) {
+      html += esc(out.slice(last, m.index));
+      if (m[1] !== undefined) html += '<span class="' + (m[2] ? "j-k" : "j-s") + '">' + esc(m[1]) + "</span>" + esc(m[2] || "");
+      else html += '<span class="j-n">' + esc(m[0]) + "</span>";
+      last = re.lastIndex;
+    }
+    return "<pre>" + html + esc(out.slice(last)) + "</pre>";
+  }
+
+  function diffHtml(text) {
+    return "<pre>" + text.split("\n").map(function (l) {
+      var cls = /^\+\+\+ |^--- /.test(l) ? "d-meta" : l.charAt(0) === "+" ? "d-add" : l.charAt(0) === "-" ? "d-del" :
+                l.indexOf("@@") === 0 ? "d-hunk" : /^(diff |index |Index: |=+$)/.test(l) ? "d-meta" : "";
+      return cls ? '<span class="' + cls + '">' + esc(l) + "</span>" : esc(l) + "\n";
+    }).join("") + "</pre>";
+  }
+
+  function parseCsv(text, sep) {
+    var rowsOut = [], row = [], cell = "", inq = false;
+    for (var i = 0; i < text.length; i++) {
+      var c = text.charAt(i);
+      if (inq) {
+        if (c === '"') { if (text.charAt(i + 1) === '"') { cell += '"'; i++; } else inq = false; }
+        else cell += c;
+      } else if (c === '"') inq = true;
+      else if (c === sep) { row.push(cell); cell = ""; }
+      else if (c === "\n" || c === "\r") {
+        if (c === "\r" && text.charAt(i + 1) === "\n") i++;
+        row.push(cell); rowsOut.push(row); row = []; cell = "";
+      } else cell += c;
+    }
+    if (cell.length || row.length) { row.push(cell); rowsOut.push(row); }
+    return rowsOut;
+  }
+  function tableHtml(rowsIn, headerRow) {
+    var html = '<div class="tablewrap"><table>';
+    rowsIn.slice(0, 500).forEach(function (r, i) {
+      var tag = headerRow && i === 0 ? "th" : "td";
+      html += "<tr>" + r.map(function (c) { return "<" + tag + ">" + esc(c) + "</" + tag + ">"; }).join("") + "</tr>";
+    });
+    html += "</table>" + (rowsIn.length > 500 ? '<span class="note">+' + (rowsIn.length - 500) + " rows</span>" : "") + "</div>";
+    return html;
+  }
+
+  function hexDump(bytes, limit) {
+    var n = Math.min(bytes.length, limit || 4096), lines = [];
+    for (var off = 0; off < n; off += 16) {
+      var hex = "", asc = "";
+      for (var i = 0; i < 16; i++) {
+        if (off + i < n) {
+          var v = bytes[off + i];
+          hex += (v < 16 ? "0" : "") + v.toString(16) + (i === 7 ? "  " : " ");
+          asc += v >= 32 && v < 127 ? String.fromCharCode(v) : ".";
+        } else hex += "   " + (i === 7 ? " " : "");
+      }
+      lines.push(("00000000" + off.toString(16)).slice(-8) + "  " + hex + " <b>" + esc(asc) + "</b>");
+    }
+    if (bytes.length > n) lines.push("... " + (bytes.length - n) + " more bytes");
+    return '<pre class="hex">' + lines.join("\n") + "</pre>";
+  }
+
+  // Markdown: headings, paragraphs, lists, quotes, fenced code, rules,
+  // tables, inline code/bold/italic/links. Images are named, never loaded.
+  function inlineMd(s) {
+    var parts = s.split(/(`[^`]*`)/);
+    return parts.map(function (p, i) {
+      if (i % 2) return "<code>" + esc(p.slice(1, -1)) + "</code>";
+      var h = esc(p);
+      h = h.replace(/!\[([^\]]*)\]\(([^)\s]+)[^)]*\)/g, function (_, alt, url) { return '<span class="img">[image: ' + (alt || url) + "]</span>"; });
+      h = h.replace(/\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g, function (_, text, url) {
+        return /^(https?:|mailto:)/i.test(url) ? '<a href="' + url + '" target="_blank" rel="noreferrer noopener">' + text + "</a>" : text + " (" + url + ")";
+      });
+      h = h.replace(/(\*\*|__)(?=\S)([\s\S]*?\S)\1/g, "<strong>$2</strong>");
+      h = h.replace(/(^|[^*\w])\*(?=\S)([^*]*?\S)\*(?!\w)/g, "$1<em>$2</em>");
+      h = h.replace(/(^|[^_\w])_(?=\S)([^_]*?\S)_(?!\w)/g, "$1<em>$2</em>");
+      return h;
+    }).join("");
+  }
+  function renderMarkdown(md) {
+    var lines = md.replace(/\r\n/g, "\n").split("\n"), out = [], i = 0, m;
+    function para(buf) { if (buf.length) out.push("<p>" + inlineMd(buf.join(" ")) + "</p>"); }
+    var buf = [];
+    while (i < lines.length) {
+      var l = lines[i];
+      if (/^```/.test(l)) {
+        para(buf); buf = [];
+        var code = []; i++;
+        while (i < lines.length && !/^```/.test(lines[i])) code.push(lines[i++]);
+        i++;
+        out.push("<pre><code>" + esc(code.join("\n")) + "</code></pre>");
+        continue;
+      }
+      if ((m = l.match(/^(#{1,6})\s+(.*)$/))) { para(buf); buf = []; var n = Math.min(m[1].length, 4); out.push("<h" + n + ">" + inlineMd(m[2]) + "</h" + n + ">"); i++; continue; }
+      if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(l)) { para(buf); buf = []; out.push("<hr>"); i++; continue; }
+      if (/^>/.test(l)) {
+        para(buf); buf = [];
+        var q = [];
+        while (i < lines.length && /^>/.test(lines[i])) q.push(lines[i++].replace(/^>\s?/, ""));
+        out.push("<blockquote>" + renderMarkdown(q.join("\n")) + "</blockquote>");
+        continue;
+      }
+      if (/^\s*[-*+]\s+/.test(l) || /^\s*\d+[.)]\s+/.test(l)) {
+        para(buf); buf = [];
+        var ordered = /^\s*\d+[.)]\s+/.test(l), items = [];
+        while (i < lines.length && (/^\s*[-*+]\s+/.test(lines[i]) || /^\s*\d+[.)]\s+/.test(lines[i]) || /^\s{2,}\S/.test(lines[i]))) {
+          var t = lines[i++];
+          if (/^\s{2,}\S/.test(t) && items.length && !/^\s*([-*+]|\d+[.)])\s+/.test(t)) items[items.length - 1] += " " + t.trim();
+          else items.push(t.replace(/^\s*([-*+]|\d+[.)])\s+/, ""));
+        }
+        out.push((ordered ? "<ol>" : "<ul>") + items.map(function (it) { return "<li>" + inlineMd(it) + "</li>"; }).join("") + (ordered ? "</ol>" : "</ul>"));
+        continue;
+      }
+      if (/^\s*\|.*\|\s*$/.test(l) && i + 1 < lines.length && /^\s*\|?\s*:?-{2,}/.test(lines[i + 1])) {
+        para(buf); buf = [];
+        var trs = [];
+        while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) {
+          var cells = lines[i].trim().replace(/^\||\|$/g, "").split("|").map(function (c) { return c.trim(); });
+          if (!/^:?-{2,}/.test(cells[0])) trs.push(cells);
+          i++;
+        }
+        out.push("<table>" + trs.map(function (r, k) { var tag = k === 0 ? "th" : "td"; return "<tr>" + r.map(function (c) { return "<" + tag + ">" + inlineMd(c) + "</" + tag + ">"; }).join("") + "</tr>"; }).join("") + "</table>");
+        continue;
+      }
+      if (!l.trim()) { para(buf); buf = []; i++; continue; }
+      buf.push(l.trim()); i++;
+    }
+    para(buf);
+    return out.join("\n");
+  }
+
+  function frontMatter(text) {
+    // Returns {meta: [[name, value]...], body} for a --- block, else null.
+    var lines = text.replace(/\r\n/g, "\n").split("\n");
+    if (lines[0].trim() !== "---") return null;
+    var end = lines.indexOf("---", 1);
+    if (end < 0) return null;
+    var meta = [], last = null, m;
+    lines.slice(1, end).forEach(function (l) {
+      if ((m = l.match(/^\s*-\s+(.*)$/)) && last) meta.push([last, m[1].trim()]);
+      else if ((m = l.match(/^(\s*)([^:]+):\s*(.*)$/))) { last = m[2].trim(); if (m[3].trim()) meta.push([last, m[3].trim()]); }
+      else if (last && l.trim() && meta.length && meta[meta.length - 1][0] === last) meta[meta.length - 1][1] += " " + l.trim();
+    });
+    return { meta: meta, body: lines.slice(end + 1).join("\n") };
+  }
+
+  function parseMultipart(bytes, boundary) {
+    // Split a multipart body into parts: [{headers, headText, body: Uint8Array}].
+    var text = new TextDecoder("latin1").decode(bytes), delim = "--" + boundary, parts = [], pos = text.indexOf(delim);
+    while (pos >= 0) {
+      var start = pos + delim.length;
+      if (text.substr(start, 2) === "--") break;
+      var next = text.indexOf(delim, start);
+      var chunk = text.slice(start, next < 0 ? text.length : next).replace(/^\r?\n/, "").replace(/\r?\n$/, "");
+      var cut = chunk.search(/\r?\n\r?\n/);
+      var headText = cut < 0 ? "" : chunk.slice(0, cut);
+      var bodyStart = cut < 0 ? 0 : cut + (chunk.substr(cut, 4) === "\r\n\r\n" ? 4 : 2);
+      var headers = {};
+      headText.split(/\r?\n/).forEach(function (l) { var i = l.indexOf(":"); if (i > 0) headers[l.slice(0, i).trim().toLowerCase()] = l.slice(i + 1).trim(); });
+      var bodyLatin = chunk.slice(bodyStart), body = new Uint8Array(bodyLatin.length);
+      for (var i = 0; i < bodyLatin.length; i++) body[i] = bodyLatin.charCodeAt(i);
+      parts.push({ headers: headers, headText: headText, body: body });
+      if (next < 0) break;
+      pos = next;
+    }
+    return parts;
+  }
+
+  function headLines(bytes, kindHint) {
+    // Parse an HTTP head from bytes: {html, headers, bodyStart}, or null
+    // when the bytes do not start with a status line or a request line.
+    var cut = splitEnvelope(bytes);
+    var text = decode(bytes.slice(0, cut[0])), lines = text.split(/\r?\n/), headers = {};
+    var first = lines[0] || "";
+    var isResp = /^HTTP\/\d(\.\d)? \d{3}/.test(first), isReq = /^[A-Z]+ \S+ HTTP\/\d/.test(first);
+    if (!isResp && !isReq && kindHint !== "request" && kindHint !== "response") return null;
+    var code = isResp ? Number(first.split(" ")[1]) : 0;
+    var html = '<span class="start' + (code >= 400 ? " err" : "") + '">' + esc(first) + "</span>\n";
+    lines.slice(1).forEach(function (l) {
+      var i = l.indexOf(":");
+      if (i > 0) {
+        headers[l.slice(0, i).trim().toLowerCase()] = l.slice(i + 1).trim();
+        html += '<span class="hn">' + esc(l.slice(0, i + 1)) + "</span>" + esc(l.slice(i + 1)) + "\n";
+      } else html += esc(l) + "\n";
+    });
+    return { html: html, headers: headers, bodyStart: cut[1] };
+  }
+
+  // renderBody: Promise of HTML for a body, by media type. Text falls back
+  // to an escaped <pre>. depth limits nested message/http and multipart.
+  function renderBody(bytes, type, encoding, depth) {
+    depth = depth || 0;
+    return inflate(bytes, encoding).then(function (inflated) {
+      var b = inflated || bytes;
+      if (!b.length) return '<span class="note">(empty body)</span>';
+      var full = (type || "").trim(), main = full.split(";")[0].trim().toLowerCase();
+      if (!main) { main = sniff(b); full = main; }
+      var text = isText(b), t = text ? decode(b) : "";
+      if (main.indexOf("image/") === 0 && (main !== "image/svg+xml" || text)) return '<img src="' + blobUrl(b, main) + '" alt="">';
+      if (main.indexOf("audio/") === 0) return '<audio controls src="' + blobUrl(b, main) + '"></audio>';
+      if (main.indexOf("video/") === 0) return '<video controls src="' + blobUrl(b, main) + '"></video>';
+      if (main === "application/pdf") return '<embed type="application/pdf" src="' + blobUrl(b, main) + '">';
+      if (main === "text/html" && text) return htmlFrame(t) + "<details><summary>source</summary><pre>" + esc(t) + "</pre></details>";
+      if (main === "message/http" && depth < 4) {
+        var head = headLines(b);
+        if (head) {
+          return renderBody(b.slice(head.bodyStart), head.headers["content-type"], (head.headers["content-encoding"] || "").toLowerCase(), depth + 1)
+            .then(function (inner) { return '<div class="nested"><pre>' + head.html + '</pre><div class="media">' + inner + "</div></div>"; });
+        }
+      }
+      if (main.indexOf("multipart/") === 0 && depth < 4) {
+        var bm = full.match(/boundary="?([^";]+)"?/i);
+        if (bm) {
+          var parts = parseMultipart(b, bm[1]);
+          return Promise.all(parts.map(function (p) {
+            return renderBody(p.body, p.headers["content-type"], "", depth + 1).then(function (inner) {
+              return '<div class="part"><div class="ph">' + esc(p.headText).replace(/\n/g, "<br>") + '</div><div class="media">' + inner + "</div></div>";
+            });
+          })).then(function (all) { return all.join("") || '<span class="note">(no parts)</span>'; });
+        }
+      }
+      if ((main === "application/json" || /\+json$/.test(main)) && text) { var pj = prettyJson(t); if (pj) return pj; }
+      if ((main === "text/markdown" || main === "text/x-markdown") && text) return '<div class="md">' + renderMarkdown(t) + "</div>";
+      if ((main === "text/csv" || main === "text/tab-separated-values") && text) return tableHtml(parseCsv(t, main === "text/csv" ? "," : "\t"), true);
+      if (main === "application/x-www-form-urlencoded" && text) {
+        var kv = []; new URLSearchParams(t).forEach(function (v, k) { kv.push([k, v]); });
+        return tableHtml([["name", "value"]].concat(kv), true);
+      }
+      if ((main === "text/x-diff" || main === "text/x-patch") && text) return diffHtml(t);
+      if (text) return "<pre>" + esc(t.replace(/\r\n/g, "\n")) + "</pre>";
+      return '<span class="note">' + human(b.length) + (main ? ", " + esc(main) : ", binary") + "</span>" + hexDump(b, 512);
+    });
+  }
+
+  var renderSeq = 0, viewMode = "rendered";
   function showRecord(id) {
     var r = rows("SELECT id, kind, status, method, path, raw, ts FROM records WHERE id = ?", [id])[0];
     if (!r) return;
-    var raw = r.raw.replace(/\r\n/g, "\n");
-    var html = "";
-    if (r.kind === "note" || r.kind === "raw") {
-      html = esc(raw);
-    } else {
-      var idx = raw.indexOf("\n\n");
-      var head = idx >= 0 ? raw.slice(0, idx) : raw;
-      var body = idx >= 0 ? raw.slice(idx + 2) : "";
-      var lines = head.split("\n");
-      var startCls = r.kind === "response" && r.status >= 400 ? "start err" : "start";
-      html += '<span class="' + startCls + '">' + esc(lines[0]) + "</span>\n";
-      lines.slice(1).forEach(function (l) {
-        var i = l.indexOf(":");
-        html += i > 0 ? '<span class="hn">' + esc(l.slice(0, i + 1)) + "</span>" + esc(l.slice(i + 1)) + "\n" : esc(l) + "\n";
-      });
-      html += "\n" + esc(body);
+    var seq = ++renderSeq;   // a later showRecord (new id or new file) wins
+    urls.forEach(function (u) { URL.revokeObjectURL(u); });
+    urls = [];
+    // raw is a BLOB (Uint8Array) for rows written since 0.3, a string for older rows.
+    var bytes = typeof r.raw === "string" ? new TextEncoder().encode(r.raw) : r.raw;
+    var name = String(r.path || "").split("/").pop() || ("record-" + r.id);
+    var text = isText(bytes);
+    var headHtml = "", headers = {}, bodyBytes = bytes;
+    if (r.kind === "request" || r.kind === "response") {
+      var head = headLines(bytes, r.kind);
+      if (head) { headHtml = head.html + "\n"; headers = head.headers; bodyBytes = bytes.slice(head.bodyStart); }
+    } else if (r.kind === "note" && text) {
+      var fm = frontMatter(decode(bytes));
+      if (fm) {
+        headHtml = fm.meta.map(function (kv) { return '<span class="hn">' + esc(kv[0]) + ":</span> " + esc(kv[1]) + "\n"; }).join("") + "\n";
+        bodyBytes = new TextEncoder().encode(fm.body.replace(/^\n+/, ""));
+      }
     }
-    $("detail").innerHTML =
-      '<div class="meta"><span>#' + r.id + "</span><span>" + esc(r.kind) + "</span><span>" +
-      esc(new Date(r.ts * 1000).toLocaleString()) + '</span><button id="copy" type="button">copy raw</button></div>' +
-      "<pre>" + html + "</pre>";
-    $("copy").addEventListener("click", function () {
-      navigator.clipboard.writeText(r.raw).then(function () {
-        $("copy").textContent = "copied";
-        setTimeout(function () { $("copy").textContent = "copy raw"; }, 1200);
+    var type = headers["content-type"] || (r.kind === "note" ? "text/markdown" : sniff(bodyBytes));
+    var encoding = (headers["content-encoding"] || "").trim().toLowerCase();
+    var bodyType = type.split(";")[0].trim().toLowerCase();
+    var media = /^(image|audio|video)\//.test(bodyType) || bodyType === "application/pdf";
+    var ids = rowIds(), at = ids.indexOf(r.id);
+    var meta = '<div class="meta"><span class="id">#' + r.id + "</span><span>" + esc(r.kind) + "</span><span>" +
+      esc(new Date(r.ts * 1000).toLocaleString()) + "</span><span>" + human(bytes.length) + "</span>" +
+      (bodyType ? "<span>" + esc(bodyType) + "</span>" : "") + "</div>" +
+      '<div class="meta actions">' +
+      '<button type="button" id="prev"' + (at > 0 ? "" : " disabled") + ">prev</button>" +
+      '<button type="button" id="next"' + (at >= 0 && at < ids.length - 1 ? "" : " disabled") + ">next</button>" +
+      '<button type="button" id="view-rendered"' + (viewMode === "rendered" ? ' class="on"' : "") + ">rendered</button>" +
+      '<button type="button" id="view-source"' + (viewMode === "source" ? ' class="on"' : "") + ">source</button>" +
+      '<span class="right">' +
+      (bodyBytes.length && bodyBytes !== bytes ? '<a download="' + esc(name) + '" href="' + blobUrl(bodyBytes, bodyType || "application/octet-stream") + '">save body</a>' : "") +
+      (media ? '<a href="' + blobUrl(bodyBytes, bodyType) + '" target="_blank" rel="noopener">open</a>' : "") +
+      '<a download="' + esc(name) + (r.kind === "request" || r.kind === "response" ? ".http" : "") + '" href="' + blobUrl(bytes, "application/octet-stream") + '">save raw</a>' +
+      (text ? '<button type="button" id="copy">copy</button>' : "") +
+      '<button type="button" id="full">' + (panes.focus ? "shrink" : "full") + "</button>" +
+      '<button type="button" id="close">close</button>' +
+      "</span></div>";
+    var rendered = viewMode === "source"
+      ? Promise.resolve(text ? "<pre>" + esc(decode(bytes).replace(/\r\n/g, "\n")) + "</pre>" : "<pre>" + headHtml + "</pre>" + hexDump(bodyBytes, 65536))
+      : renderBody(bodyBytes, type, encoding, 0).then(function (bodyHtml) {
+          var plain = bodyHtml.indexOf("<pre>") === 0 && bodyHtml.indexOf("<pre>", 5) < 0 && bodyHtml.indexOf("<pre class") < 0;
+          return plain ? "<pre>" + headHtml + bodyHtml.slice(5) : (headHtml ? "<pre>" + headHtml + "</pre>" : "") + '<div class="media">' + bodyHtml + "</div>";
+        });
+    rendered.then(function (html) {
+      if (seq !== renderSeq) return;
+      $("detail").innerHTML = meta + html;
+      $("detail").scrollTop = 0;
+      function on(id, fn) { var el = $(id); if (el) el.addEventListener("click", fn); }
+      on("prev", function () { moveSelection(-1); });
+      on("next", function () { moveSelection(1); });
+      on("view-rendered", function () { viewMode = "rendered"; showRecord(r.id); });
+      on("view-source", function () { viewMode = "source"; showRecord(r.id); });
+      on("full", function () { setPane("focus", !panes.focus); showRecord(r.id); });
+      on("close", function () { setPane("detail", false); });
+      on("copy", function () {
+        navigator.clipboard.writeText(decode(bytes)).then(function () {
+          $("copy").textContent = "copied";
+          setTimeout(function () { var c = $("copy"); if (c) c.textContent = "copy"; }, 1200);
+        });
       });
     });
   }
