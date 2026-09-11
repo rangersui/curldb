@@ -1,0 +1,3 @@
+include SYSTEM.md
+recursive-include tests *.py
+include scripts/check_dist.py

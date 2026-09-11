@@ -1,5 +1,234 @@
 # httpdb
 
+HTTP exchange datastore. One SQLite file per session; the requests and responses of an AI conversation stored as-is, queried by envelope fields.
+
+[中文说明在后面](#中文)
+
+## What it does
+
+Every message in an LLM conversation is an HTTP envelope: what you type is a request, what the model answers is a response, a tool call is a request plus a response. httpdb stores each envelope verbatim in SQLite, parses status / method / path / headers into an index, and full-text indexes the body.
+
+```
+what you type ---------> httpdb wrap 'POST /chat' -H X-Topic:x ---+
+model reply (HTTP/1.1 200 OK ...) --------------------------------+--> httpdb add --> session.sqlite
+tool call (POST /tool/Read ... / HTTP/1.1 200 OK ...) ------------+
+                                                                        |
+                                         httpdb query 'status=409 header:X-Scope=design'
+                                         httpdb tags
+```
+
+raw is the source of truth. Every index is parsed from raw and can be rebuilt.
+
+## Three principles
+
+**One session, one file.** The file name is the session identity: `httpdb --db 2026-09-11-design.sqlite` or `HTTPDB_PATH`, default `httpdb.sqlite` in the current directory. Searching across sessions is querying each file in turn.
+
+**Headers are tags, not a schema.** Names and values need no agreement up front. `X-Verdict: shaky` is unreadable to a conventional program and readable to an LLM. The program stores, counts and lists; `httpdb tags` prints every header name and value this file has seen, so you look first, then query. The vocabulary grows out of the data.
+
+**The body is never touched.** Whoever adds headers (you, the model, an annotating model, a hook) adds headers only. Annotators sign with `Via:` so records tagged by different models stay distinguishable.
+
+## How messages get in
+
+### Model replies
+
+Give the model a system prompt like [SYSTEM.md](SYSTEM.md) so its output carries its own envelope: technical output starts with `HTTP/1.1 200 OK` and headers such as `X-Verdict` or `X-Scope`; small talk starts with `PUBLISH topic/path`. The first line decides the pipe:
+
+```
+HTTP/     -> httpdb add
+PUBLISH   -> mosquitto_pub, or append to a log file; never stored
+```
+
+### What you type
+
+Type as usual, no HTTP. An adapter wraps it:
+
+```bash
+echo 'what about tool calls' | httpdb wrap 'POST /chat' -H X-Topic:tool-call | httpdb add
+```
+
+`wrap` adds only the start line, a `Date:` and the headers you pass; the body is untouched. To tag your own words, tee a copy to a cheap annotating model that emits header lines only, merge them back into the envelope, store. You stay out of the loop.
+
+### Tool calls
+
+A tool call is already a request and its result already a response. The translation is mechanical, no model involved:
+
+```
+tool name     -> POST /tool/Read
+args (JSON)   -> body, Content-Type: application/json
+result        -> response body
+success/error -> status 200 / 4xx / 5xx
+```
+
+It lives in the harness hook (Claude Code's PreToolUse / PostToolUse):
+
+```bash
+# PreToolUse
+echo "$ARGS_JSON" | httpdb wrap "POST /tool/$TOOL" -H Content-Type:application/json -H X-Tool:$TOOL | httpdb add
+# PostToolUse
+echo "$RESULT" | httpdb wrap 200 -H X-Tool:$TOOL | httpdb add
+```
+
+A turn that mixes prose with several tool calls is split at protocol boundaries and each piece is stored on its own.
+
+Envelopes are stored as UTF-8. Tool args produced by Python's `json.dumps` with default settings escape non-ASCII to `\u4e2d`; they are stored escaped and full-text search will not find the characters. Use `json.dumps(args, ensure_ascii=False)` in the hook.
+
+### Notes and files
+
+The `---` YAML front matter at the top of a markdown file is header + body too. `httpdb add note.md` reads a local file: `kind=note`, the file path becomes `path`, raw is the whole file. The front matter is flattened into the headers index:
+
+```
+title: hello              ->  title: hello
+tags: [rust, iot]         ->  tags: rust / tags: iot        (list = repeated name)
+metadata:                 ->  metadata.type: feedback       (nesting = dotted name)
+  type: feedback
+desc: |                   ->  desc: first line second line  (block scalar = lines joined)
+  first line
+  second line
+```
+
+Supported is the common front matter subset: `key: value`, indentation nesting, `- item` and `[a, b]` lists, `|` / `>` blocks, quotes. Anchors and inline maps are stored as text. A file without front matter is `kind=raw`, the whole file is the body, and it is searchable all the same.
+
+One file per call; a whole directory is a shell loop:
+
+```bash
+for f in vault/*.md; do httpdb add "$f"; done
+httpdb tags                     # the tag panel of this vault
+httpdb query 'header:tags=iot'
+```
+
+### Network door
+
+`httpdb serve` opens an HTTP door onto the same file. It is a peer of the CLI, operation for operation:
+
+```
+POST /<anything>     stored as received (request line, all headers, body), 201 + Location: /<id>
+GET  /<id>           the whole stored message, Content-Type: message/http
+HEAD /<id>           standard HEAD
+GET  /?q=<expr>      same as httpdb query
+GET  /tags[/<name>]  same as httpdb tags
+```
+
+The received request is the envelope; nothing to wrap:
+
+```bash
+httpdb serve                                       # 127.0.0.1:200, --db picks the file
+curl -X POST localhost:200/chat -H 'X-Topic: fork' -d 'what about fork?'
+curl localhost:200/42
+curl 'localhost:200/?q=status=409'
+```
+
+The default port is 200. Ports below 1024 need root on Linux/macOS; `httpdb serve 8200` avoids sudo.
+
+An AI can curl straight in. A Codex review sent as `PUT /review` is stored as that PUT request with the review in the body; to store it as a response, use `httpdb add` from the CLI.
+
+Bound to localhost, no token. The trust model is the CLI's: whoever can run curl on this machine.
+
+## Querying afterwards
+
+```bash
+httpdb tags                                  # which headers exist in this file, with values
+httpdb tags X-Verdict                         # every value of one header
+
+httpdb query 'status=400'                     # the model said you were wrong
+httpdb query 'status=409'                     # conflicts with something established
+httpdb query 'header:X-Verdict=shaky'         # conclusions that did not hold
+httpdb query 'kind=request path=/chat'        # things you said
+httpdb query 'header:X-Tool status=500'       # failed tool calls
+httpdb query 'path~/tool/ body~timeout'       # tool calls that timed out
+httpdb query 'status=200 header:X-Scope=design body~protocol'
+
+httpdb get 42                                 # the raw envelope
+httpdb ls 50                                  # the latest 50
+```
+
+## Usage
+
+```
+httpdb add [file]           store one envelope from stdin or a file: HTTP request/response, or markdown with front matter
+httpdb wrap START [-H N:V]  wrap the stdin body in an envelope; START is a status code (200) or a request line (POST /chat)
+httpdb get <id>             print the raw envelope by id
+httpdb headers <id>         print the headers of a record
+httpdb query '<expr>'       search
+httpdb tags [name]          header names and values, with counts
+httpdb ls [n]               the latest n records (default 20)
+httpdb stats                database status
+httpdb serve [port]         HTTP door on 127.0.0.1, default 200
+
+--db PATH or HTTPDB_PATH picks the file, default ./httpdb.sqlite
+```
+
+### Query DSL
+
+All conditions are ANDed, separated by spaces:
+
+```
+kind=request|response|note|raw
+status=200              status code
+status=200,201          status in set
+method=POST             request method
+path=/chat              request path equals
+path~/tool/             request path contains
+header:X-Verdict        header exists
+header:X-Verdict=solid  header value equals
+body~fork               body full-text search
+body~"exact phrase"     body phrase search
+anyword                 bare word, body search
+```
+
+Full-text search uses FTS5 with the trigram tokenizer (SQLite 3.34+), so CJK substrings match directly; older SQLite falls back to unicode61 + LIKE, and `httpdb stats` shows which one is in use.
+
+## Install
+
+```bash
+pip install httpdb
+```
+
+Or copy the one file:
+
+```bash
+cp httpdb.py ~/.local/bin/httpdb
+chmod +x ~/.local/bin/httpdb
+```
+
+Zero dependencies. Python 3.10+, standard-library sqlite3.
+
+## Development and verification
+
+Run the standard-library tests from the repository root, no test dependencies needed:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The tests cover raw round trips (UTF-8, LF / CRLF / CR), combined queries, CJK search and the tokenizer fallback, front matter, legacy layout migration, the CLI and the local HTTP door. Databases live in temporary directories; the HTTP tests use a system-assigned port.
+
+Build and check a release:
+
+```bash
+python -m pip install build twine
+python -m build
+python -m twine check --strict dist/*
+python scripts/check_dist.py dist
+```
+
+`dist` should hold exactly one wheel and one sdist from this build. The check script verifies license, version, zero runtime dependencies and sdist contents, then installs the wheel offline into a temporary virtual environment and exercises the installed command line. The sdist contains `SYSTEM.md`, the tests and the check script.
+
+GitHub Actions runs the tests on Windows and Linux with Python 3.10 and 3.14, plus a build-and-install check of the release artifacts.
+
+## Design choices
+
+- **Verbatim storage** -- the raw envelope goes into a SQLite TEXT column as-is.
+- **Rebuildable index** -- kind / status / method / path / headers / body_fts are all parsed from raw.
+- **Lenient parsing** -- accepts `\n` and `\r\n`, ignores malformed headers, Content-Length optional. It is a document parser.
+- **One session, one file** -- backup is `cp`, sync is rsync.
+- **One CLI** -- in, out, exit. `serve` is a second door onto the same cabinet, opened when wanted.
+- **Append only** -- no update, no delete.
+- **Stores HTTP messages, queries HTTP messages** -- `GET /<id>` returns the stored message itself (`message/http`). A stored message is always data; it is never replayed as the server's own reply. To view HTML an AI wrote: `httpdb get 42 > x.html` and open it locally.
+
+---
+
+# 中文
+
 HTTP exchange 原生存储。一个 session 一个 SQLite 文件,AI 对话里的 request 和 response 原样存,按信封字段查。
 
 ## 干嘛的
@@ -67,6 +296,8 @@ echo "$RESULT" | httpdb wrap 200 -H X-Tool:$TOOL | httpdb add
 ```
 
 一个 turn 里 prose 和多个 tool call 混着,按协议边界切开各存各的。
+
+信封一律按 UTF-8 存。tool args 如果是用 Python 的 `json.dumps` 默认参数生成的,中文会变成 `\u4e2d` 这种转义,存进去就是转义,全文搜索搜不到中文;hook 里用 `json.dumps(args, ensure_ascii=False)`。
 
 ### 笔记和文件
 
@@ -187,6 +418,29 @@ chmod +x ~/.local/bin/httpdb
 ```
 
 零依赖。Python 3.10+,标准库 sqlite3。
+
+## 开发与验证
+
+在仓库根目录运行标准库测试,不需要安装测试依赖:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+测试覆盖原文存取(UTF-8、LF / CRLF / CR)、组合查询、中文搜索及 tokenizer 回退、front matter、旧库迁移、CLI 和本地 HTTP 入口。数据库都放在临时目录,HTTP 测试使用系统分配的临时端口。
+
+构建和检查发行包:
+
+```bash
+python -m pip install build twine
+python -m build
+python -m twine check --strict dist/*
+python scripts/check_dist.py dist
+```
+
+`dist` 中应只有本次构建的一份 wheel 和一份源码包。检查脚本核对许可证、版本、零运行时依赖和源码包内容,再在临时虚拟环境中离线安装 wheel,验证实际安装后的命令行存取。源码包包含 `SYSTEM.md`、测试和检查脚本。
+
+GitHub Actions 在 Windows / Linux 的 Python 3.10 / 3.14 上运行测试,另有发行包构建与安装检查。
 
 ## 设计选择
 

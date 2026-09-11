@@ -17,7 +17,6 @@ import os
 import re
 import sqlite3
 import sys
-import textwrap
 import time
 from http import HTTPStatus
 
@@ -530,6 +529,13 @@ def stats() -> dict:
 DEFAULT_PORT = 200   # HTTP 200. Below 1024, so root on Linux/macOS.
 
 
+def _utf8_from_latin1(text: str) -> str:
+    try:
+        return text.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+
+
 def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -588,8 +594,14 @@ def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
         def _store(self) -> None:
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length).decode("utf-8", "replace")
-            lines = [f"{self.command} {self.path} {self.request_version}"]
-            lines.extend(f"{k}: {v}" for k, v in self.headers.items())
+            # http.server decodes the request line and headers as
+            # latin-1; re-encode to recover the UTF-8 bytes the client
+            # actually sent, otherwise non-ASCII names, values and paths
+            # would be stored double-encoded.
+            path = _utf8_from_latin1(self.path)
+            lines = [f"{self.command} {path} {self.request_version}"]
+            lines.extend(f"{_utf8_from_latin1(k)}: {_utf8_from_latin1(v)}"
+                         for k, v in self.headers.items())
             raw = "\n".join(lines) + "\n\n" + body
             rid = add(raw)
             self._text(201, f"#{rid}\n", {"Location": f"/{rid}"})
@@ -716,9 +728,11 @@ def cli(argv: list[str] | None = None) -> None:
 
     # Envelopes are UTF-8 regardless of the console's locale (Windows
     # consoles default to a legacy code page and would mangle CJK).
-    for stream in (sys.stdin, sys.stdout):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", errors="replace")
+    # Preserve input line endings too: raw envelopes are archival data.
+    if hasattr(sys.stdin, "reconfigure"):
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace", newline="")
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     if "--db" in args:
         i = args.index("--db")
@@ -737,7 +751,7 @@ def cli(argv: list[str] | None = None) -> None:
         source = None
         if rest and rest[0] != "-":
             source = rest[0]
-            with open(source, encoding="utf-8") as f:
+            with open(source, encoding="utf-8", newline="") as f:
                 raw = f.read()
         else:
             raw = sys.stdin.read()

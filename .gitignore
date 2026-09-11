@@ -2,6 +2,7 @@
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+*.sqlite-journal
 
 # mqtt side log from the adapter
 mqtt.log
@@ -9,6 +10,8 @@ mqtt.log
 # python
 __pycache__/
 *.pyc
+.venv/
+.pytest_cache/
 
 # packaging
 build/
