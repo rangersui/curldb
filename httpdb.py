@@ -21,7 +21,7 @@ import textwrap
 import time
 from http import HTTPStatus
 
-__version__ = "0.2.0"
+__version__ = "0.1.0"
 
 DEFAULT_DB = "httpdb.sqlite"
 
@@ -33,46 +33,155 @@ _STATUS_LINE = re.compile(r"HTTP/[\d.]+\s+(\d{3})")
 _REQUEST_LINE = re.compile(r"([A-Z]+)\s+(\S+)\s+HTTP/[\d.]+")
 
 
-def parse_envelope(raw: str) -> dict:
-    """Parse raw HTTP text into its parts.
+def parse_envelope(raw: str, source_path: str | None = None) -> dict:
+    """Parse raw text into its parts.
 
     Returns {kind, status, method, path, headers, body}. kind is
     "response" (status line first), "request" (request line first),
-    or "raw" (neither; whole text is the body).
+    "note" (a --- front matter block first), or "raw" (none of those;
+    the whole text is the body). Notes and raw text take source_path
+    as their path; HTTP envelopes carry their own.
 
     Lenient: accepts \\n or \\r\\n, ignores malformed headers,
     ignores Content-Length. This is a document parser, not a
     protocol parser.
     """
     text = raw.replace("\r\n", "\n")
-    if "\n\n" in text:
-        head, body = text.split("\n\n", 1)
-    else:
-        head, body = text, ""
-    lines = head.split("\n")
+    lines = text.split("\n")
     first = lines[0] if lines else ""
+    path = source_path.replace("\\", "/") if source_path else None
 
-    out = {"kind": "raw", "status": None, "method": None, "path": None,
-           "headers": [], "body": body.strip()}
+    out = {"kind": "raw", "status": None, "method": None, "path": path,
+           "headers": [], "body": text.strip()}
+
+    if first.strip() == "---":
+        try:
+            end = lines.index("---", 1)
+        except ValueError:
+            return out
+        out["kind"] = "note"
+        out["headers"] = _flatten_front_matter(lines[1:end])
+        out["body"] = "\n".join(lines[end + 1:]).strip()
+        return out
 
     m = _STATUS_LINE.match(first)
     if m:
         out["kind"] = "response"
         out["status"] = int(m.group(1))
+        out["path"] = None
     else:
         m = _REQUEST_LINE.match(first)
-        if m:
-            out["kind"] = "request"
-            out["method"] = m.group(1)
-            out["path"] = m.group(2)
-        else:
-            out["body"] = text.strip()
+        if not m:
             return out
+        out["kind"] = "request"
+        out["method"] = m.group(1)
+        out["path"] = m.group(2)
 
-    for line in lines[1:]:
+    if "\n\n" in text:
+        head, body = text.split("\n\n", 1)
+    else:
+        head, body = text, ""
+    out["body"] = body.strip()
+    for line in head.split("\n")[1:]:
         if ":" in line:
             name, _, value = line.partition(":")
             out["headers"].append((name.strip(), value.strip()))
+    return out
+
+
+def _unquote(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _flatten_front_matter(lines: list[str]) -> list[tuple[str, str]]:
+    """Flatten a YAML front matter subset into header pairs.
+
+    Nested maps become dotted names (metadata.type), lists become
+    repeated names (tags: a / tags: b), block scalars (| or >) join
+    their lines with spaces, quotes are stripped. Anchors, flow maps
+    and quoted colons are not interpreted; an unparseable line is
+    stored as its own name with an empty value.
+    """
+    out: list[tuple[str, str]] = []
+    stack: list[tuple[int, str]] = []   # (indent, dotted prefix)
+    i = 0
+    n = len(lines)
+
+    def prefix_at(indent: int) -> str:
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+        return stack[-1][1] if stack else ""
+
+    def joined(prefix: str, key: str) -> str:
+        return f"{prefix}.{key}" if prefix else key
+
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+        i += 1
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = _indent(line)
+
+        if stripped.startswith("- "):
+            # list item under the nearest enclosing key
+            prefix = prefix_at(indent + 1)
+            item = stripped[2:].strip()
+            if ":" in item and not item.startswith(("\"", "'", "[")):
+                k, _, v = item.partition(":")
+                out.append((joined(prefix, k.strip()), _unquote(v)))
+            else:
+                out.append((prefix, _unquote(item)))
+            continue
+
+        if ":" not in stripped:
+            out.append((joined(prefix_at(indent), stripped), ""))
+            continue
+
+        key, _, value = stripped.partition(":")
+        key = key.strip()
+        value = value.strip()
+        prefix = prefix_at(indent)
+        name = joined(prefix, key)
+
+        if value in ("|", ">", "|-", ">-"):
+            block: list[str] = []
+            while i < n and (not lines[i].strip() or _indent(lines[i]) > indent):
+                if lines[i].strip():
+                    block.append(lines[i].strip())
+                i += 1
+            out.append((name, " ".join(block)))
+            continue
+
+        if value.startswith("[") and value.endswith("]"):
+            for item in value[1:-1].split(","):
+                item = _unquote(item)
+                if item:
+                    out.append((name, item))
+            continue
+
+        if value:
+            out.append((name, _unquote(value)))
+            continue
+
+        # bare "key:" is a parent if something more indented follows,
+        # otherwise a header with an empty value
+        j = i
+        while j < n and not lines[j].strip():
+            j += 1
+        child = lines[j] if j < n else ""
+        if child and (_indent(child) > indent or
+                      (_indent(child) >= indent and child.strip().startswith("- "))):
+            stack.append((indent, name))
+        else:
+            out.append((name, ""))
     return out
 
 
@@ -181,8 +290,8 @@ def _fts_is_trigram(conn: sqlite3.Connection) -> bool:
 
 
 def _drop_v1(conn: sqlite3.Connection) -> list[tuple[str, float]]:
-    """A 0.1.x file has a responses table and headers keyed by
-    response_id. Pull its raw rows out, drop the old layout, and
+    """The first local layout had a responses table and headers keyed
+    by response_id. Pull its raw rows out, drop the old layout, and
     hand the rows back so _init can re-add them into records."""
     old = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE name='responses'").fetchone()
@@ -201,12 +310,12 @@ def _drop_v1(conn: sqlite3.Connection) -> list[tuple[str, float]]:
 
 
 def add(raw: str, conn: sqlite3.Connection | None = None,
-        ts: float | None = None) -> int:
-    """Store one raw HTTP envelope. Returns the new record id."""
+        ts: float | None = None, source_path: str | None = None) -> int:
+    """Store one raw envelope. Returns the new record id."""
     own = conn is None
     if own:
         conn = _connect()
-    p = parse_envelope(raw)
+    p = parse_envelope(raw, source_path)
     cur = conn.execute(
         "INSERT INTO records (kind, status, method, path, raw, body, ts)"
         " VALUES (?,?,?,?,?,?,?)",
@@ -261,7 +370,7 @@ def query(expr: str) -> list[dict]:
     header_n = 0
 
     for token in _tokenize(expr):
-        m = re.fullmatch(r"kind=(request|response|raw)", token)
+        m = re.fullmatch(r"kind=(request|response|note|raw)", token)
         if m:
             wheres.append("r.kind = ?")
             params.append(m.group(1))
@@ -410,6 +519,104 @@ def stats() -> dict:
             "path": path, "trigram": trigram}
 
 # -----------------------------------------------
+# SERVE
+# -----------------------------------------------
+#
+# A network door onto the same file. It archives the HTTP messages it
+# receives and hands them back; it never interprets a stored message as
+# its own reply. Same operations as the CLI, nothing more.
+
+
+DEFAULT_PORT = 200   # HTTP 200. Below 1024, so root on Linux/macOS.
+
+
+def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        server_version = f"httpdb/{__version__}"
+        sys_version = ""
+
+        def _text(self, code: int, text: str, extra: dict | None = None,
+                  head_only: bool = False) -> None:
+            data = text.encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            for k, v in (extra or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+            if not head_only:
+                self.wfile.write(data)
+
+        def _record(self, head_only: bool) -> None:
+            rid = self.path.lstrip("/")
+            if not rid.isdigit():
+                self._text(404, "not found\n", head_only=head_only)
+                return
+            raw = get(int(rid))
+            if raw is None:
+                self._text(404, "not found\n", head_only=head_only)
+                return
+            data = raw.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "message/http")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            if not head_only:
+                self.wfile.write(data)
+
+        def _read(self, head_only: bool = False) -> None:
+            from urllib.parse import parse_qs, urlsplit
+            url = urlsplit(self.path)
+            if url.path == "/":
+                q = parse_qs(url.query).get("q", [""])[0]
+                results = query(q) if q else ls()
+                self._text(200, _format_results(results), head_only=head_only)
+            elif url.path == "/tags" or url.path.startswith("/tags/"):
+                name = url.path[len("/tags/"):] or None
+                self._text(200, _format_tags(tags(name)), head_only=head_only)
+            else:
+                self._record(head_only)
+
+        def do_GET(self) -> None:
+            self._read()
+
+        def do_HEAD(self) -> None:
+            self._read(head_only=True)
+
+        def _store(self) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length).decode("utf-8", "replace")
+            lines = [f"{self.command} {self.path} {self.request_version}"]
+            lines.extend(f"{k}: {v}" for k, v in self.headers.items())
+            raw = "\n".join(lines) + "\n\n" + body
+            rid = add(raw)
+            self._text(201, f"#{rid}\n", {"Location": f"/{rid}"})
+
+        do_POST = _store
+        do_PUT = _store
+        do_PATCH = _store
+        do_DELETE = _store
+
+        def log_message(self, fmt: str, *args) -> None:
+            sys.stderr.write(f"{self.command} {self.path} {args[1] if len(args) > 1 else ''}\n")
+
+    try:
+        httpd = HTTPServer((host, port), Handler)
+    except PermissionError:
+        _die(f"port {port} needs root on this OS; try: httpdb serve 8200")
+    except OSError as exc:
+        _die(f"cannot bind {host}:{port}: {exc}")
+    sys.stderr.write(f"httpdb {__version__} on http://{host}:{port}/  db={db_path()}\n")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()
+
+# -----------------------------------------------
 # CLI
 # -----------------------------------------------
 
@@ -423,16 +630,35 @@ def _label(r: dict) -> str:
         return f"{r['status']:>4}"
     if r["kind"] == "request":
         return f"{r['method']} {r['path']}"
-    return " raw"
+    path = r["path"] or ""
+    if len(path) > 14:
+        path = "..." + path[-11:]
+    return f"{r['kind']} {path}".rstrip()
+
+
+def _format_results(results: list[dict]) -> str:
+    if not results:
+        return "(no matches)\n"
+    lines = []
+    for r in results:
+        preview = r["preview"].replace("\n", " ")[:60]
+        lines.append(f"  {r['id']:>5}  {_ts_short(r['ts'])}  {_label(r):<20}  {preview}")
+    return "\n".join(lines) + "\n"
+
+
+def _format_tags(t: dict[str, list[tuple[str, int]]]) -> str:
+    if not t:
+        return "(no headers)\n"
+    lines = []
+    for n, values in t.items():
+        shown = " ".join(f"{v}({c})" for v, c in values[:12])
+        more = f" +{len(values) - 12}" if len(values) > 12 else ""
+        lines.append(f"  {n}: {shown}{more}")
+    return "\n".join(lines) + "\n"
 
 
 def _print_results(results: list[dict]) -> None:
-    if not results:
-        print("(no matches)")
-        return
-    for r in results:
-        preview = r["preview"].replace("\n", " ")[:60]
-        print(f"  {r['id']:>5}  {_ts_short(r['ts'])}  {_label(r):<20}  {preview}")
+    sys.stdout.write(_format_results(results))
 
 
 def _int_arg(args: list[str], i: int, usage: str) -> int:
@@ -460,7 +686,8 @@ def _write_raw(text: str) -> None:
 HELP = """\
 httpdb -- HTTP exchange datastore (one sqlite file per session)
 
-  add [file]           store a raw HTTP request/response (stdin or file)
+  add [file]           store a raw HTTP request/response, or a markdown
+                       file with --- front matter (stdin or file)
   wrap START [-H N:V]  wrap stdin body in an envelope; START is a status
                        code (200) or a request line (POST /chat)
   get <id>             print raw record by id
@@ -469,9 +696,13 @@ httpdb -- HTTP exchange datastore (one sqlite file per session)
   tags [name]          every header name/value seen, with counts
   ls [n]               list recent records (default 20)
   stats                db stats
+  serve [port]         HTTP door on 127.0.0.1 (default 200; root below 1024 on unix):
+                       POST/PUT anything -> stored as received, 201 + Location
+                       GET /<id> -> the stored message (message/http)
+                       GET /?q=<expr>, GET /tags[/<name>] -> same as the CLI
 
 query DSL (tokens AND'd together):
-  kind=request|response   status=200   status=200,201
+  kind=request|response|note|raw   status=200   status=200,201
   method=POST   path=/chat   path~/tool/
   header:X-Verdict   header:X-Verdict=solid
   body~word   body~"a phrase"   anyword
@@ -503,18 +734,20 @@ def cli(argv: list[str] | None = None) -> None:
     cmd, rest = args[0], args[1:]
 
     if cmd == "add":
+        source = None
         if rest and rest[0] != "-":
-            with open(rest[0], encoding="utf-8") as f:
+            source = rest[0]
+            with open(source, encoding="utf-8") as f:
                 raw = f.read()
         else:
             raw = sys.stdin.read()
         if not raw.strip():
             _die("empty input")
-        rid = add(raw)
-        p = parse_envelope(raw)
+        rid = add(raw, source_path=source)
+        p = parse_envelope(raw, source)
         label = (p["status"] if p["kind"] == "response"
                  else f"{p['method']} {p['path']}" if p["kind"] == "request"
-                 else "raw")
+                 else f"{p['kind']} {p['path'] or ''}".rstrip())
         print(f"#{rid} {label} +{len(p['headers'])} headers")
 
     elif cmd == "wrap":
@@ -552,13 +785,10 @@ def cli(argv: list[str] | None = None) -> None:
         _print_results(query(" ".join(rest)))
 
     elif cmd == "tags":
-        t = tags(rest[0] if rest else None)
-        if not t:
-            print("(no headers)")
-        for n, values in t.items():
-            shown = " ".join(f"{v}({c})" for v, c in values[:12])
-            more = f" +{len(values) - 12}" if len(values) > 12 else ""
-            print(f"  {n}: {shown}{more}")
+        sys.stdout.write(_format_tags(tags(rest[0] if rest else None)))
+
+    elif cmd == "serve":
+        serve(int(rest[0]) if rest else DEFAULT_PORT)
 
     elif cmd == "ls":
         _print_results(ls(int(rest[0]) if rest else 20))

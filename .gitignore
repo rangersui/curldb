@@ -9,3 +9,8 @@ mqtt.log
 # python
 __pycache__/
 *.pyc
+
+# packaging
+build/
+dist/
+*.egg-info/

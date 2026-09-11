@@ -68,6 +68,57 @@ echo "$RESULT" | httpdb wrap 200 -H X-Tool:$TOOL | httpdb add
 
 一个 turn 里 prose 和多个 tool call 混着,按协议边界切开各存各的。
 
+### 笔记和文件
+
+markdown 顶上那段 `---` 夹着的 YAML front matter 也是 header + body。`httpdb add note.md` 直接读本地文件,`kind=note`,文件路径当 `path`,raw 是整个文件原文。front matter 打平进 headers 索引:
+
+```
+title: hello              ->  title: hello
+tags: [rust, iot]         ->  tags: rust / tags: iot        (列表 = 同名重复)
+metadata:                 ->  metadata.type: feedback       (嵌套 = 点号)
+  type: feedback
+desc: |                   ->  desc: first line second line  (多行块按空格拼)
+  first line
+  second line
+```
+
+支持的是 front matter 常见子集:`key: value`、缩进嵌套、`- item` 和 `[a, b]` 列表、`|` / `>` 块、引号。锚点和行内 map 当文本存。没有 front matter 的文件 `kind=raw`,整个文件是 body,一样能搜。
+
+一次一个文件,整个目录用 shell 循环:
+
+```bash
+for f in vault/*.md; do httpdb add "$f"; done
+httpdb tags                     # 这个 vault 的 tag 面板
+httpdb query 'header:tags=iot'
+```
+
+### 网络入口
+
+`httpdb serve` 给同一个文件开一个 HTTP 门,和 CLI 平级,功能一一对应:
+
+```
+POST /<anything>     收到什么存什么(请求行、所有 header、body),201 + Location: /<id>
+GET  /<id>           整条存的消息,Content-Type: message/http
+HEAD /<id>           标准 HEAD
+GET  /?q=<expr>      同 httpdb query
+GET  /tags[/<name>]  同 httpdb tags
+```
+
+收到的请求本身就是信封,不用 wrap:
+
+```bash
+httpdb serve                                       # 127.0.0.1:200,--db 选文件
+curl -X POST localhost:200/chat -H 'X-Topic: fork' -d 'what about fork?'
+curl localhost:200/42
+curl 'localhost:200/?q=status=409'
+```
+
+端口默认 200。1024 以下在 Linux/macOS 要 root,不想 sudo 就 `httpdb serve 8200`。
+
+AI 可以直接 curl 进来。Codex 的 review 以 `PUT /review` 发过来,存的是这个 PUT 请求,review 原文在 body 里;要把它当一条 response 存,走 CLI 的 `httpdb add`。
+
+只绑 localhost,没有 token:信任模型和 CLI 一样,能在这台机器上跑 curl 的人。
+
 ## 事后查
 
 ```bash
@@ -89,7 +140,7 @@ httpdb ls 50                                  # 最近 50 条
 ## 用法
 
 ```
-httpdb add [file]           从 stdin 或文件存一个 raw HTTP 信封
+httpdb add [file]           从 stdin 或文件存一个信封:HTTP request/response,或带 front matter 的 markdown
 httpdb wrap START [-H N:V]  给 stdin 的 body 套信封;START 是 status code (200) 或 request line (POST /chat)
 httpdb get <id>             按 id 取原始信封
 httpdb headers <id>         看某条的 headers
@@ -97,6 +148,7 @@ httpdb query '<expr>'       查询
 httpdb tags [name]          header 名和值,带计数
 httpdb ls [n]               最近 n 条(默认 20)
 httpdb stats                数据库状态
+httpdb serve [port]         HTTP 门,127.0.0.1,默认 200
 
 --db PATH 或 HTTPDB_PATH 选文件,默认 ./httpdb.sqlite
 ```
@@ -106,7 +158,7 @@ httpdb stats                数据库状态
 所有条件 AND 连接,空格分隔:
 
 ```
-kind=request|response
+kind=request|response|note|raw
 status=200              status code
 status=200,201          status in set
 method=POST             request method
@@ -124,11 +176,17 @@ anyword                 裸词,body 搜索
 ## 安装
 
 ```bash
+pip install httpdb
+```
+
+或者就一个文件,复制走:
+
+```bash
 cp httpdb.py ~/.local/bin/httpdb
 chmod +x ~/.local/bin/httpdb
 ```
 
-零依赖。Python 3.10+,标准库 sqlite3。0.1.x 的库文件第一次打开时自动升级。
+零依赖。Python 3.10+,标准库 sqlite3。
 
 ## 设计选择
 
@@ -136,5 +194,6 @@ chmod +x ~/.local/bin/httpdb
 - **索引可重建** -- kind / status / method / path / headers / body_fts 都从 raw 解析出来。
 - **宽松解析** -- 接受 `\n` 和 `\r\n`,忽略畸形 header,Content-Length 可选。这是文档解析器。
 - **一个 session 一个文件** -- 备份是 `cp`,同步是 rsync。
-- **一个 CLI** -- 进出,用完退出。
+- **一个 CLI** -- 进出,用完退出。`serve` 是同一个档案柜的第二扇门,想开就开。
 - **只追加** -- 没有 update,没有 delete。
+- **存 HTTP 消息,查 HTTP 消息** -- `GET /<id>` 回的是存的那条消息本身(`message/http`),存的消息永远是数据,不当 server 自己的回复回放。想看 AI 写的 HTML:`httpdb get 42 > x.html`,本地打开。
