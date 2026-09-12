@@ -527,3 +527,32 @@ test('served mode: a record the light snapshot left empty is fetched from the do
   await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r));
   assert.ok(seen.length >= 1 && seen[0] > 0, 'rendered with the fetched bytes, not the empty snapshot row');
 });
+
+test('a Link inside a message pairs records only for this file\'s own traffic', async () => {
+  const records = [
+    { id: 1, kind: 'request', method: 'GET', status: null, path: '/abc.py', ts: 1, preview: 'read file', raw: 'GET /abc.py HTTP/1.1\n\n', parent: null, host: null },
+    { id: 2, kind: 'response', method: null, status: 500, path: null, ts: 2, preview: 'failed', raw: 'HTTP/1.1 500 Error\nLink: </1>; rel="parent"\n\nfailed', parent: null, host: null },
+    { id: 3, kind: 'response', method: null, status: 200, path: null, ts: 3, preview: 'theirs', raw: 'HTTP/1.1 200 OK\nLink: </1>; rel="parent"\n\ntheirs', parent: null, host: 'api.example.com' },
+    { id: 4, kind: 'response', method: null, status: 200, path: null, ts: 4, preview: 'stamped', raw: 'HTTP/1.1 200 OK\n\nstamped', parent: 1, host: 'api.example.com' },
+  ];
+  const query = (sql, params) => {
+    if (sql.includes('WHERE id = ?')) return records.filter(r => r.id === params[0]);
+    if (sql.includes('WHERE parent = ?')) return records.filter(r => r.parent === params[0]);
+    if (sql.includes("LOWER(h.name) = 'link'")) {
+      const linked = records.filter(r => r.raw.includes('</' + params[0].replace(/^%<\/(\d+)>%parent%$/, '$1') + '>'));
+      return sql.includes('r.host IS NULL') ? linked.filter(r => r.host === null) : linked;
+    }
+    return [];
+  };
+  const { h, CV } = harness({ query });
+  await h.openFile(file('records.sqlite', 1));
+  h.S.schema.parent = true; h.S.schema.host = true;
+  const parts = id => CV.recordParts(h.fetchRow(id));
+  assert.equal(h.parentOf(parts(2)), 1, 'own record: the Link in the message counts');
+  assert.equal(h.parentOf(parts(3)), null, 'another host\'s record: its Link is about that host');
+  assert.equal(h.parentOf(parts(4)), 1, 'the parent column always counts');
+  assert.deepEqual(Array.from(h.repliesTo(1, parts(1)), r => r.id), [2, 4]);
+  h.S.schema.host = false;   // an older file without the column keeps the old reading
+  assert.equal(h.parentOf(parts(3)), 1);
+  assert.deepEqual(Array.from(h.repliesTo(1, parts(1)), r => r.id), [2, 3, 4]);
+});

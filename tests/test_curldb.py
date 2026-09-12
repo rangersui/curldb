@@ -175,7 +175,26 @@ class Target(BaseHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         self.server.seen.append((self.requestline, dict(self.headers), body))
-        if self.path == "/chunked":
+        if self.path.endswith("/hop"):
+            self.send_response(200)
+            self.send_header("Connection", "close, X-Internal")
+            self.send_header("X-Internal", "secret")
+            self.send_header("X-Public", "yes")
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
+        if self.path.endswith("/nobody"):
+            self.send_response(204)
+            self.end_headers()
+            return
+        if self.path.endswith("/notmodified"):
+            self.send_response(304)
+            self.send_header("ETag", '"v7"')
+            self.send_header("Content-Length", "99")
+            self.end_headers()
+            return
+        if self.path.endswith("/chunked"):
             self.send_response(200)
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
@@ -191,23 +210,34 @@ class Target(BaseHTTPRequestHandler):
         self.wfile.write(reply)
 
     do_GET = do_POST
+    do_HEAD = do_POST
+    do_PUT = do_POST
+    do_PATCH = do_POST
+    do_DELETE = do_POST
 
     def log_message(self, fmt, *args):
         pass
 
 
+def start_target(case):
+    """A Target server for the test, stopped at cleanup; sets case.target
+    and case.authority."""
+    case.target = ThreadingHTTPServer(("127.0.0.1", 0), Target)
+    case.target.seen = []
+    case.target.daemon_threads = True
+    case.target.handle_error = lambda *args: None   # a peer hanging up early is not news
+    thread = threading.Thread(target=case.target.serve_forever, daemon=True)
+    thread.start()
+    case.addCleanup(thread.join, 5)
+    case.addCleanup(case.target.server_close)
+    case.addCleanup(case.target.shutdown)
+    case.authority = "127.0.0.1:%d" % case.target.server_address[1]
+
+
 class ReplayTests(TemporaryDatabase):
     def setUp(self):
         super().setUp()
-        self.target = ThreadingHTTPServer(("127.0.0.1", 0), Target)
-        self.target.seen = []
-        self.target.daemon_threads = True
-        thread = threading.Thread(target=self.target.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(thread.join, 5)
-        self.addCleanup(self.target.server_close)
-        self.addCleanup(self.target.shutdown)
-        self.authority = "127.0.0.1:%d" % self.target.server_address[1]
+        start_target(self)
 
     def stored(self, host, extra="", body="hello"):
         return curldb.add(f"POST /chat HTTP/1.1\nHost: {host}\nX-Topic: fork{extra}\n\n{body}".encode())
@@ -241,6 +271,30 @@ class ReplayTests(TemporaryDatabase):
         self.assertNotIn(b"X-Topic", sent["raw"])
         self.assertEqual(curldb.get_row(out["response"])["parent"], out["request"])
         self.assertEqual([r["id"] for r in curldb.query(f"parent={rid}")], [out["request"]])
+
+    def test_setting_a_header_to_its_own_value_is_not_a_change(self):
+        rid = self.stored(self.authority, "\nContent-Length: 5")
+        out = curldb.replay(rid, host="http://" + self.authority, headers=[("X-Topic", "fork")])
+        self.assertEqual(out["request"], rid)
+        self.assertEqual(curldb.stats()["count"], 2)
+        self.assertEqual(self.target.seen[0][1]["X-Topic"], "fork")
+        # A replaced header keeps its place; a new one goes last.
+        out = curldb.replay(rid, headers=[("X-Topic", "spoon"), ("X-New", "1")])
+        sent = curldb.get_row(out["request"])["raw"]
+        self.assertTrue(sent.startswith(b"POST /chat HTTP/1.1\r\nHost: " + self.authority.encode() + b"\r\nX-Topic: spoon\r\nContent-Length: 5\r\nX-New: 1\r\n\r\nhello"))
+
+    def test_replayed_traffic_is_that_hosts_business(self):
+        target = curldb.add(b"HTTP/1.1 200 OK\r\nX-Verdict: solid\r\n\r\nx")
+        foreign = curldb.add(f"PATCH /{target} HTTP/1.1\r\nHost: api.example.com\r\nX-Verdict: shaky\r\n\r\n".encode(), host="api.example.com")
+        self.assertEqual(curldb.get_row(foreign)["host"], "api.example.com")
+        self.assertIsNone(curldb.get_row(foreign)["parent"])
+        self.assertEqual(dict(curldb.headers_of(target)), {"X-Verdict": "solid"})
+        out = curldb.replay(foreign, host="http://" + self.authority)
+        sent, rep = curldb.get_row(out["request"]), curldb.get_row(out["response"])
+        self.assertEqual((sent["method"], sent["path"], sent["host"], sent["parent"]), ("PATCH", f"/{target}", self.authority, foreign))
+        self.assertEqual((rep["host"], rep["parent"]), (self.authority, out["request"]))
+        self.assertEqual(dict(curldb.headers_of(target)), {"X-Verdict": "solid"})
+        self.assertEqual(self.target.seen[0][0], f"PATCH /{target} HTTP/1.1")
 
     def test_chunked_response_is_stored_joined(self):
         rid = curldb.add(f"POST /chunked HTTP/1.1\r\nHost: {self.authority}\r\nContent-Length: 5\r\n\r\nhello".encode())
@@ -429,7 +483,12 @@ class CLITests(TemporaryDatabase):
                 self.assertIn(error, result.stderr)
 
 
-class HTTPTests(TemporaryDatabase):
+class Door(TemporaryDatabase):
+    """A curldb door on a free port; serve_kwargs() picks its mode."""
+
+    def serve_kwargs(self):
+        return {}
+
     def setUp(self):
         super().setUp()
         ready = queue.Queue()
@@ -440,7 +499,7 @@ class HTTPTests(TemporaryDatabase):
             ready.put(server)
             return server
 
-        self.thread = threading.Thread(target=curldb.serve, args=(0,), daemon=True)
+        self.thread = threading.Thread(target=curldb.serve, args=(0,), kwargs=self.serve_kwargs(), daemon=True)
         with patch("http.server.ThreadingHTTPServer", side_effect=create_server):
             self.thread.start()
             self.server = ready.get(timeout=5)
@@ -466,6 +525,133 @@ class HTTPTests(TemporaryDatabase):
         finally:
             client.close()
 
+class UpstreamTests(Door):
+    def serve_kwargs(self):
+        start_target(self)
+        return {"upstream": "http://%s/v1" % self.authority}
+
+    def test_requests_go_upstream_and_both_sides_are_stored(self):
+        status, headers, body = self.request("POST", "/chat", b"hello", {"X-Topic": "fork", "Connection": "close", "Host": "localhost"})
+        self.assertEqual((status, body), (201, b"got: hello"))
+        self.assertEqual(headers["Via"], "1.1 curldb")
+        self.assertEqual(headers["Content-Type"], "text/plain")
+        line, seen, sent = self.target.seen[0]
+        self.assertEqual(line, "POST /v1/chat HTTP/1.1")
+        self.assertEqual((seen["Host"], seen["X-Topic"], sent), (self.authority, "fork", b"hello"))
+        self.assertNotIn("Connection", seen)
+        req, rep = curldb.get_row(1), curldb.get_row(2)
+        self.assertEqual((req["kind"], req["method"], req["path"], req["parent"]), ("request", "POST", "/v1/chat", None))
+        self.assertTrue(req["raw"].startswith(b"POST /v1/chat HTTP/1.1\r\nHost: " + self.authority.encode() + b"\r\n"))
+        self.assertIn(b"\r\nContent-Length: 5\r\n\r\nhello", req["raw"])
+        self.assertNotIn(b"Connection", req["raw"])
+        self.assertEqual((rep["kind"], rep["status"], rep["parent"]), ("response", 201, 1))
+        self.assertTrue(rep["raw"].startswith(b"HTTP/1.1 201 Created\r\n"))
+        self.assertTrue(rep["raw"].endswith(b"got: hello"))
+        self.assertNotIn(b"Via", rep["raw"])   # Via is added on the way back, the stored answer is the upstream's
+        self.assertEqual(curldb.stats()["count"], 2)
+
+    def test_chunked_answers_and_the_doors_own_paths_go_upstream_too(self):
+        status, headers, body = self.request("GET", "/chunked")
+        self.assertEqual((status, body), (200, b"echo "))
+        self.assertEqual(headers["Content-Length"], "5")
+        self.assertNotIn("Transfer-Encoding", headers)
+        rep = curldb.get_row(2)["raw"]
+        self.assertNotIn(b"Transfer-Encoding", rep)
+        self.assertIn(b"\r\nContent-Length: 5\r\n", rep)
+        status, headers, body = self.request("GET", "/db")
+        self.assertEqual((status, body), (201, b"got: "))   # not the snapshot: this port is the gateway
+        self.assertEqual(self.target.seen[1][0], "GET /v1/db HTTP/1.1")
+        status, headers, body = self.request("HEAD", "/chat")
+        self.assertEqual((status, body), (201, b""))
+        self.assertEqual(headers["Content-Length"], "5")
+        self.assertEqual(curldb.stats()["count"], 6)
+
+    def test_connection_named_headers_stop_at_the_gateway_both_ways(self):
+        status, headers, body = self.request("GET", "/hop", None, {"Connection": "close, X-Secret", "X-Secret": "1", "X-Keep": "2"})
+        self.assertEqual((status, body), (200, b"ok"))
+        self.assertNotIn("X-Internal", headers)
+        self.assertEqual(headers["X-Public"], "yes")
+        line, seen, _ = self.target.seen[0]
+        self.assertNotIn("X-Secret", seen)
+        self.assertEqual(seen["X-Keep"], "2")
+        self.assertNotIn(b"X-Secret", curldb.get(1))
+        self.assertIn(b"X-Internal: secret", curldb.get(2))   # stored as the upstream sent it
+
+    def test_answers_without_a_body_keep_their_own_length_rules(self):
+        status, headers, body = self.request("GET", "/nobody")
+        self.assertEqual((status, body), (204, b""))
+        self.assertNotIn("Content-Length", headers)
+        status, headers, body = self.request("HEAD", "/nobody")
+        self.assertEqual((status, body), (204, b""))
+        self.assertNotIn("Content-Length", headers)
+        status, headers, body = self.request("GET", "/notmodified")
+        self.assertEqual((status, body), (304, b""))
+        self.assertEqual((headers["ETag"], headers["Content-Length"]), ('"v7"', "99"))
+        status, headers, body = self.request("POST", "/chat", b"hello")   # the connection is still usable
+        self.assertEqual((status, body), (201, b"got: hello"))
+        self.assertEqual(curldb.stats()["count"], 8)
+
+    def test_upgrades_are_refused_and_nothing_is_stored(self):
+        for extra in ({"Upgrade": "websocket", "Connection": "Upgrade"}, {"Connection": "keep-alive, upgrade"}):
+            status, headers, body = self.request("GET", "/chat", None, extra)
+            self.assertEqual(status, 501)
+            self.assertIn(b"Upgrade is not forwarded", body)
+        self.assertEqual(self.target.seen, [])
+        self.assertEqual(curldb.stats()["count"], 0)
+
+    def test_gateway_traffic_carries_the_host_and_is_never_this_files_bookkeeping(self):
+        rows = [curldb.get_row(i) for i in (self.request("POST", "/chat", b"hello") and (1, 2))]
+        self.assertEqual([r["host"] for r in rows], [self.authority, self.authority])
+
+    def test_unreachable_upstream_is_502_and_the_request_stays(self):
+        self.target.shutdown()
+        self.target.server_close()
+        status, headers, body = self.request("POST", "/chat", b"hello")
+        self.assertEqual(status, 502)
+        self.assertTrue(body.startswith(b"#1 stored; upstream http://" + self.authority.encode()))
+        self.assertEqual(headers["Via"], "1.1 curldb")
+        self.assertEqual(curldb.stats()["count"], 1)
+        self.assertEqual(curldb.get_row(1)["kind"], "request")
+        self.assertEqual(curldb.query("parent=1"), [])
+
+    def test_bad_upstream_addresses_are_refused(self):
+        for bad in ("ftp://x", "http://", "http://a b", "http://x/p q"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    curldb._parse_upstream(bad)
+        self.assertEqual(curldb._parse_upstream("api.example.com"), ("http://api.example.com", "api.example.com", ""))
+        self.assertEqual(curldb._parse_upstream("https://h:8443/v1/"), ("https://h:8443", "h:8443", "/v1"))
+        out = subprocess.run([sys.executable, str(SCRIPT), "serve", "0", "--upstream", "ftp://x"], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("not an upstream address", out.stderr)
+
+
+class GatewayWithoutPrefixTests(Door):
+    def serve_kwargs(self):
+        start_target(self)
+        return {"upstream": self.authority}
+
+    def test_captured_patch_and_put_queries_are_the_upstreams_business(self):
+        rid = curldb.add(RAW)
+        curldb.save_query("mine", "status=409")
+        status, headers, body = self.request("PATCH", f"/{rid}", b"", {"X-Flag": "true", "X-Scope": ""})
+        self.assertEqual(status, 201)   # the upstream's answer, not the door's
+        status, headers, body = self.request("PUT", "/queries/mine", b"status=200")
+        self.assertEqual(status, 201)
+        status, headers, body = self.request("DELETE", "/queries/mine", b"")
+        self.assertEqual(status, 201)
+        self.assertEqual(self.target.seen[0][0], f"PATCH /{rid} HTTP/1.1")
+        self.assertEqual(dict(curldb.headers_of(rid)), {"X-Scope": "design"})
+        self.assertEqual(len(curldb.header_history(rid)), 1)
+        self.assertEqual(curldb.saved_queries(), {"mine": "status=409"})
+        self.assertEqual(curldb.query("@mine")[0]["id"], rid)
+        patch = curldb.get_row(3)
+        self.assertEqual((patch["method"], patch["path"], patch["host"], patch["parent"]), ("PATCH", f"/{rid}", self.authority, None))
+        self.assertEqual(curldb.query(f"parent={rid}"), [])
+        self.assertEqual(curldb.stats()["count"], 8)
+
+
+class HTTPTests(Door):
     def test_write_methods_archive_requests_including_delete(self):
         body = RAW.encode("utf-8")
         for method in ("POST", "PUT", "PATCH", "DELETE"):
@@ -594,6 +780,24 @@ class HTTPTests(TemporaryDatabase):
         reply = self._raw_exchange(head + b"Content-Length: five\r\n\r\nabc")
         self.assertTrue(reply.startswith(b"HTTP/1.1 400"), reply)
         self.assertEqual(curldb.stats()["count"], 0)
+
+    def test_ambiguous_request_framing_is_refused(self):
+        head = b"POST /chat HTTP/1.1\r\nHost: x\r\n"
+        cases = [
+            (b"Content-Length: 0\r\nContent-Length: 3\r\n\r\nabc", b"400", b"conflicting Content-Length"),
+            (b"Content-Length: -1\r\n\r\n", b"400", b"not a whole number"),
+            (b"Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", b"501", b"chunked, chunked"),
+            (b"Transfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n", b"501", b"gzip, chunked"),
+        ]
+        for tail, code, text in cases:
+            with self.subTest(tail=tail):
+                reply = self._raw_exchange(head + tail)
+                self.assertTrue(reply.startswith(b"HTTP/1.1 " + code), reply[:40])
+                self.assertIn(text, reply)
+        self.assertEqual(curldb.stats()["count"], 0)
+        # Two agreeing copies are one length.
+        reply = self._raw_exchange(head + b"Content-Length: 3\r\nContent-Length: 3\r\n\r\nabc")
+        self.assertTrue(reply.startswith(b"HTTP/1.1 201"))
 
     def test_chunked_with_content_length_stores_one_true_length(self):
         wire = (b"POST /x HTTP/1.1\r\nHost: t\r\nContent-Length: 999\r\n"
@@ -724,6 +928,9 @@ class HTTPTests(TemporaryDatabase):
         self.assertEqual(curldb.get(1), b"HTTP/1.1 200 OK\n\nold")
         # Existing rows were paired from their Link headers when the column arrived.
         self.assertEqual(curldb.get_row(3)["parent"], 2)
+        # The host column arrived too; old rows are this file's own.
+        self.assertIsNone(curldb.get_row(1)["host"])
+        self.assertEqual(dict(curldb.headers_of(rid)), {"X-Scope": "design"})
 
     def test_transport_headers_are_stored_but_not_tags(self):
         status, headers, _ = self.request("POST", "/chat", b"hi", {"X-Topic": "fork", "Cookie": "a=b", "Referer": "http://x/"})

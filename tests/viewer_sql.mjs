@@ -9,8 +9,9 @@ const el = () => ({ textContent: '', innerHTML: '', hidden: false, className: ''
 const ctx = vm.createContext({ document: { getElementById: el, createElement: el, createTextNode: t => ({}), addEventListener() {} }, window: {}, navigator: {}, localStorage: { getItem: () => null }, TextDecoder, TextEncoder, Blob, URL: { createObjectURL: () => '', revokeObjectURL() {} }, initSqlJs: () => Promise.resolve({}), setTimeout: () => 0, clearTimeout() {} });
 sources.forEach(s => vm.runInContext(s, ctx));
 const app = ctx.window.CV.app;
-app.S.folder = 'all'; app.S.schema.parent = true;
+app.S.folder = 'all'; app.S.schema.parent = true; app.S.schema.host = true;
 const input = JSON.parse(readFileSync(0, 'utf8'));
+if (input.view) { console.log(JSON.stringify({ view: app.effectiveView(true) })); process.exit(0); }
 const exprs = input.exprs, saved = input.saved || {};
 // The only table the query builder reads itself is the saved queries; hand those in.
 const savedRows = Object.keys(saved).map(name => ({ method: 'PUT', path: '/queries/' + name, body: saved[name] }));

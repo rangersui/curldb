@@ -294,11 +294,19 @@ def _init(conn: sqlite3.Connection) -> None:
     # new values for record 12 (an empty value clears a name). The view
     # overlays them on the original headers, latest amendment first, so
     # nothing here needs to be stored twice and the log stays the truth.
+    # host: the address a record was sent to or came from (0.6): a
+    # gateway or replay sets it, the door and the CLI leave it NULL. A
+    # PATCH /12 or PUT /queries/x addressed to some other host is that
+    # host's business, not an amendment or a saved query here.
+    cols = {c[1] for c in conn.execute("PRAGMA table_info(records)")}
+    if "host" not in cols:
+        conn.execute("ALTER TABLE records ADD COLUMN host TEXT")
+        conn.commit()
     _ensure_view(conn, "effective_headers", """
         CREATE VIEW effective_headers AS
         WITH amendrec AS (
             SELECT id, CAST(substr(path, 2) AS INTEGER) AS target FROM records
-            WHERE kind = 'request' AND method = 'PATCH'
+            WHERE kind = 'request' AND method = 'PATCH' AND host IS NULL
               AND path GLOB '/[0-9]*' AND path NOT GLOB '/*[^0-9]*'
         ),
         amend AS (
@@ -419,26 +427,30 @@ def _drop_v1(conn: sqlite3.Connection) -> list[tuple[str, float]]:
 
 def add(raw: bytes | str, conn: sqlite3.Connection | None = None,
         ts: float | None = None, source_path: str | None = None,
-        parent: int | None = None) -> int:
+        parent: int | None = None, host: str | None = None) -> int:
     """Store one raw record, as bytes. Returns the new record id.
 
     parent is the id of the record this one answers. When not given,
-    a Link header with rel="parent" inside the message supplies it."""
+    a Link header with rel="parent" inside the message supplies it.
+    host is the address the message was sent to or came from; with a
+    host the message is somebody else's traffic: its Link, and a
+    PATCH /<id> or PUT /queries/<name> path, mean nothing here."""
     if isinstance(raw, str):
         raw = raw.encode("utf-8")
     own = conn is None
     if own:
         conn = _connect()
     p = parse_envelope(raw, source_path)
-    if parent is None:
-        parent = _parent_from_headers(p["headers"], conn)
-    if parent is None:
-        parent = _amend_target(p)
+    if host is None:
+        if parent is None:
+            parent = _parent_from_headers(p["headers"], conn)
+        if parent is None:
+            parent = _amend_target(p)
     cur = conn.execute(
-        "INSERT INTO records (kind, status, method, path, raw, body, ts, parent)"
-        " VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO records (kind, status, method, path, raw, body, ts, parent, host)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
         (p["kind"], p["status"], p["method"], p["path"], raw, p["body"],
-         ts if ts is not None else time.time(), parent))
+         ts if ts is not None else time.time(), parent, host))
     rid = cur.lastrowid
     tagged = [(n, v) for n, v in p["headers"] if not _is_transport(n)]
     if tagged:
@@ -556,8 +568,8 @@ def header_history(rid: int) -> list[dict]:
     out = [{"id": rid, "ts": None, "headers": conn.execute(
         "SELECT name, value FROM headers WHERE record_id=?", (rid,)).fetchall()}]
     for aid, ts in conn.execute(
-            "SELECT id, ts FROM records WHERE kind='request' AND method='PATCH' AND path=?"
-            " ORDER BY id", (f"/{rid}",)).fetchall():
+            "SELECT id, ts FROM records WHERE kind='request' AND method='PATCH' AND host IS NULL"
+            " AND path=? ORDER BY id", (f"/{rid}",)).fetchall():
         out.append({"id": aid, "ts": ts, "headers": conn.execute(
             "SELECT name, value FROM headers WHERE record_id=?", (aid,)).fetchall()})
     conn.close()
@@ -578,7 +590,7 @@ def saved_queries(conn: sqlite3.Connection | None = None) -> dict[str, str]:
         conn = _connect()
     out: dict[str, str] = {}
     rows = conn.execute(
-        "SELECT method, path, body FROM records WHERE kind='request'"
+        "SELECT method, path, body FROM records WHERE kind='request' AND host IS NULL"
         " AND path GLOB '/queries/?*' AND method IN ('PUT', 'DELETE') ORDER BY id").fetchall()
     for method, path, body in rows:
         name = path[len("/queries/"):]
@@ -617,12 +629,12 @@ def get(rid: int) -> bytes | None:
 
 def get_row(rid: int) -> dict | None:
     """One record with its index fields: id, kind, status, method, path,
-    ts, and raw as bytes (rows written before 0.3 were text; they come
-    back encoded)."""
+    ts, parent, host, and raw as bytes (rows written before 0.3 were
+    text; they come back encoded)."""
     conn = _connect()
     conn.row_factory = sqlite3.Row
     row = conn.execute(
-        "SELECT id, kind, status, method, path, ts, raw, parent FROM records WHERE id=?",
+        "SELECT id, kind, status, method, path, ts, raw, parent, host FROM records WHERE id=?",
         (rid,)).fetchone()
     conn.close()
     if row is None:
@@ -939,6 +951,23 @@ def _without_header(lines: list[bytes], name: str) -> list[bytes]:
     return [l for l in lines if l.partition(b":")[0].strip().lower() != name.lower().encode()]
 
 
+def _set_header(lines: list[bytes], name: str, value: str) -> list[bytes]:
+    """Header lines with name set to value: the first occurrence is
+    replaced in place, later ones dropped, a missing name appended; an
+    empty value removes the name."""
+    key = name.lower().encode()
+    out, done = [], False
+    for line in lines:
+        if line.partition(b":")[0].strip().lower() != key:
+            out.append(line)
+        elif value and not done:
+            out.append(f"{name}: {value}".encode("utf-8"))
+            done = True
+    if value and not done:
+        out.append(f"{name}: {value}".encode("utf-8"))
+    return out
+
+
 def _read_response(rfile, head_request: bool) -> tuple[int, bytes]:
     """One HTTP response from the wire: (status, the message as bytes).
     Framing follows the message: Content-Length, chunked (stored joined
@@ -1009,6 +1038,9 @@ def replay(rid: int, host: str | None = None, headers: list[tuple[str, str]] | N
     whether the peer acted on it is unknown. A connect or TLS handshake
     failure stores nothing.
 
+    Records stored here carry the address as their host, so a PATCH /12
+    sent to some server is not read as an amendment of record 12 here.
+
     Returns {request, response, status, raw}: the id the response
     answers, the id of the stored response (None with save=False), the
     status code, and the response bytes.
@@ -1042,9 +1074,7 @@ def replay(rid: int, host: str | None = None, headers: list[tuple[str, str]] | N
     edits = ([("Host", authority)] if host else []) + list(headers or [])
     _check_headers(edits)
     for n, v in edits:
-        lines = _without_header(lines, n)
-        if v:
-            lines.append(f"{n}: {v}".encode("utf-8"))
+        lines = _set_header(lines, n, v)
     if body and _header_line(lines, "content-length") is None and not _header_line(lines, "transfer-encoding"):
         lines.append(b"Content-Length: " + str(len(body)).encode())
     wire = b"\r\n".join([first] + lines) + b"\r\n\r\n" + body
@@ -1057,7 +1087,7 @@ def replay(rid: int, host: str | None = None, headers: list[tuple[str, str]] | N
         if tls:
             sock = ssl.create_default_context().wrap_socket(sock, server_hostname=name)
         if save and changed:
-            sent = add(wire, parent=rid)
+            sent = add(wire, parent=rid, host=authority)
         try:
             sock.sendall(wire)
             rfile = sock.makefile("rb")
@@ -1072,7 +1102,7 @@ def replay(rid: int, host: str | None = None, headers: list[tuple[str, str]] | N
 
     out = {"request": sent, "response": None, "status": status, "raw": raw}
     if save:
-        out["response"] = add(raw, parent=sent)
+        out["response"] = add(raw, parent=sent, host=authority)
     return out
 
 # -----------------------------------------------
@@ -1082,6 +1112,12 @@ def replay(rid: int, host: str | None = None, headers: list[tuple[str, str]] | N
 # A network door onto the same file. It archives the HTTP messages it
 # receives and hands them back; it never interprets a stored message as
 # its own reply. Same operations as the CLI, nothing more.
+#
+# With an upstream it is a different door: a gateway (a reverse proxy).
+# Every request on that port goes to the upstream through replay and
+# the upstream's answer comes back to the client; the request as sent
+# and the response as received are the two records. The door's own
+# operations are not on that port.
 
 
 DEFAULT_PORT = 200   # HTTP 200. Below 1024, so root on Linux/macOS.
@@ -1151,8 +1187,36 @@ def snapshot(strip_over: int | None = None) -> bytes:
         os.unlink(tmp)
 
 
-def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
+_HOP_BY_HOP = {"connection", "keep-alive", "proxy-connection", "te", "trailer", "upgrade",
+               "transfer-encoding", "content-length"}
+UPSTREAM_TIMEOUT = 30.0
+GATEWAY_METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+
+
+def _connection_tokens(values: list[str]) -> set[str]:
+    """The header names a Connection header (or several) declares
+    hop-by-hop, lower-cased."""
+    return {t.strip().lower() for v in values for t in v.split(",") if t.strip()}
+
+
+def _parse_upstream(upstream: str) -> tuple[str, str, str]:
+    """(scheme://host[:port], host[:port], path prefix) of an upstream
+    address; http:// when no scheme is given."""
+    from urllib.parse import urlsplit
+    if "://" not in upstream:
+        upstream = "http://" + upstream
+    u = urlsplit(upstream)
+    if u.scheme not in ("http", "https") or not u.netloc or not _HOST_ARG.fullmatch(f"{u.scheme}://{u.netloc}"):
+        raise ValueError(f"not an upstream address: {upstream!r} (write [https://]host[:port][/prefix])")
+    prefix = u.path.rstrip("/")
+    if not re.fullmatch(r"[!-~]*", prefix):
+        raise ValueError(f"upstream path prefix is not a URL path: {prefix!r}")
+    return f"{u.scheme}://{u.netloc}", u.netloc, prefix
+
+
+def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1", upstream: str | None = None) -> None:
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    up_base, up_authority, up_prefix = _parse_upstream(upstream) if upstream else ("", "", "")
 
     class Handler(BaseHTTPRequestHandler):
         server_version = f"curldb/{__version__}"
@@ -1358,29 +1422,107 @@ def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
         def _read_chunked(self) -> bytes:
             return _read_chunked(self.rfile)
 
+        def _body(self) -> tuple[bytes, str] | None:
+            """The request body as it came and its transfer coding, or None
+            after a refusal has been sent. A chunked body comes back joined.
+            Every copy of Transfer-Encoding and Content-Length is read: the
+            codings must be exactly chunked, the lengths must agree and be
+            a whole number, otherwise the message has no clear end and is
+            refused."""
+            codings = [c.strip().lower() for v in (self.headers.get_all("Transfer-Encoding") or [])
+                       for c in v.split(",") if c.strip()]
+            if codings == ["chunked"]:
+                try:
+                    return self._read_chunked(), "chunked"
+                except ValueError as e:
+                    self._text(400, f"incomplete chunked body: {e}" + chr(10))
+                    return None
+            if codings:
+                self._text(501, f"Transfer-Encoding {', '.join(codings)}: send Content-Length or Transfer-Encoding: chunked" + chr(10))
+                return None
+            lengths = [v.strip() for v in (self.headers.get_all("Content-Length") or [])]
+            if len(set(lengths)) > 1:
+                self._text(400, f"conflicting Content-Length values: {', '.join(lengths)}" + chr(10))
+                return None
+            if lengths and not lengths[0].isdigit():
+                self._text(400, "Content-Length is not a whole number" + chr(10))
+                return None
+            length = int(lengths[0]) if lengths else 0
+            body = self.rfile.read(length)
+            if len(body) != length:
+                self._text(400, f"body ended after {len(body)} of {length} bytes" + chr(10))
+                return None
+            return body, ""
+
+        def _forward(self) -> None:
+            # The gateway door. The request goes to the upstream as one
+            # message: its path under the prefix, the upstream's Host,
+            # hop-by-hop headers dropped, the body with its true length.
+            # That message is stored, then sent through replay, which
+            # stores the answer; the answer goes back with Via added.
+            named = _connection_tokens(self.headers.get_all("Connection") or [])
+            hop = set(_HOP_BY_HOP) | named
+            if "upgrade" in named or self.headers.get("Upgrade"):
+                # An upgraded connection is a tunnel, not a message; the
+                # gateway stores messages.
+                self._text(501, "Upgrade is not forwarded" + chr(10), {"Via": "1.1 curldb"})
+                return
+            got = self._body()
+            if got is None:
+                return
+            body, coding = got
+            path = _utf8_from_latin1(self.path)
+            lines = [f"{self.command} {up_prefix}{path} HTTP/1.1", f"Host: {up_authority}"]
+            lines.extend(f"{_utf8_from_latin1(k)}: {_utf8_from_latin1(v)}" for k, v in self.headers.items()
+                         if k.lower() not in hop and k.lower() != "host")
+            if body or coding or self.headers.get("Content-Length") is not None:
+                lines.append(f"Content-Length: {len(body)}")
+            rid = add(("\r\n".join(lines) + "\r\n\r\n").encode("utf-8") + body, host=up_authority)
+            try:
+                out = replay(rid, host=up_base, timeout=UPSTREAM_TIMEOUT)
+            except (OSError, ValueError) as e:
+                self._text(502, f"#{rid} stored; upstream {up_base}: {e}" + chr(10), {"Via": "1.1 curldb"})
+                return
+            status = out["status"]
+            if status == 101:
+                self._text(502, f"#{rid} stored; upstream {up_base} switched protocols, which is not forwarded" + chr(10),
+                           {"Via": "1.1 curldb"})
+                return
+            first, hlines, rbody = _split_message(out["raw"])
+            # Hop-by-hop headers stop here: the fixed set and whatever the
+            # upstream's Connection header names. The body's length is
+            # restated for a message that has one; a HEAD answer and a 304
+            # keep the upstream's Content-Length, which describes the
+            # representation, not these bytes; a 204 carries none, HEAD
+            # or not.
+            drop = set(_HOP_BY_HOP) | _connection_tokens(
+                [v.strip().decode("latin-1") for n, _, v in (l.partition(b":") for l in hlines)
+                 if n.strip().lower() == b"connection"])
+            no_length = status == 204
+            keep_length = not no_length and (self.command == "HEAD" or status == 304)
+            parts = first.decode("latin-1").split(" ", 2)
+            self.send_response_only(status, parts[2] if len(parts) > 2 else "")
+            for line in hlines:
+                n, _, v = line.partition(b":")
+                name = n.strip().decode("latin-1")
+                if name.lower() in drop and not (keep_length and name.lower() == "content-length"):
+                    continue
+                self.send_header(name, v.strip().decode("latin-1"))
+            self.send_header("Via", "1.1 curldb")
+            has_body = not keep_length and not no_length
+            if has_body:
+                self.send_header("Content-Length", str(len(rbody)))
+            self.end_headers()
+            if has_body:
+                self.wfile.write(rbody)
+
         def _store(self) -> None:
             # Body bytes are kept as they came. A chunked body is joined and
             # stored with its length, so the stored message is self-contained.
-            coding = (self.headers.get("Transfer-Encoding") or "").strip().lower()
-            if coding == "chunked":
-                try:
-                    body = self._read_chunked()
-                except ValueError as e:
-                    self._text(400, f"incomplete chunked body: {e}" + chr(10))
-                    return
-            elif coding:
-                self._text(501, f"Transfer-Encoding {coding}: send Content-Length or Transfer-Encoding: chunked" + chr(10))
+            got = self._body()
+            if got is None:
                 return
-            else:
-                try:
-                    length = int(self.headers.get("Content-Length") or 0)
-                except ValueError:
-                    self._text(400, "Content-Length is not a number" + chr(10))
-                    return
-                body = self.rfile.read(length)
-                if len(body) != length:
-                    self._text(400, f"body ended after {len(body)} of {length} bytes" + chr(10))
-                    return
+            body, coding = got
             # Link: </12>; rel="parent" on the door names the record this
             # one answers. It is the post office's bookkeeping, like the id
             # and the time; the stored message is not touched.
@@ -1425,6 +1567,10 @@ def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
         def log_message(self, fmt: str, *args) -> None:
             sys.stderr.write(f"{self.command} {self.path} {args[1] if len(args) > 1 else ''}\n")
 
+    if upstream:
+        for method in GATEWAY_METHODS:
+            setattr(Handler, "do_" + method, Handler._forward)
+
     try:
         httpd = ThreadingHTTPServer((host, port), Handler)
         httpd.daemon_threads = True
@@ -1442,7 +1588,8 @@ def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
         _die(f"port {port} needs root on this OS; try: curldb serve 8200")
     except OSError as exc:
         _die(f"cannot bind {host}:{port}: {exc}")
-    sys.stderr.write(f"curldb {__version__} on http://{host}:{port}/  db={db_path()}\n")
+    sys.stderr.write(f"curldb {__version__} on http://{host}:{port}/  db={db_path()}"
+                     + (f"  upstream={up_base}{up_prefix}" if upstream else "") + "\n")
     httpd.stopping = False
     try:
         httpd.serve_forever()
@@ -1584,6 +1731,14 @@ curldb -- HTTP exchange datastore (one sqlite file per session)
                        256 KB travel without their bytes unless ?full=1
                        GET /events?after=N -> server-sent events, one per new record after N
                        PATCH /<id> with headers -> amends that record's headers
+  serve [port] --upstream [https://]H[:port][/prefix]
+                       a gateway on that port instead: GET HEAD POST PUT PATCH
+                       DELETE OPTIONS go to the upstream (its Host, the path
+                       under the prefix) and the answer comes back with
+                       Via: 1.1 curldb; the request as sent and the response as
+                       received are stored, paired, under that host, so they
+                       are never read as this file's amendments or queries;
+                       Upgrade is refused (501)
 
 query DSL (tokens AND'd together):
   kind=request|response|note|raw   status=200   status=200,201
@@ -1756,7 +1911,18 @@ def cli(argv: list[str] | None = None) -> None:
         sys.stdout.write(_format_tags(tags(rest[0] if rest else None)))
 
     elif cmd == "serve":
-        serve(int(rest[0]) if rest else DEFAULT_PORT)
+        upstream = None
+        if "--upstream" in rest:
+            i = rest.index("--upstream")
+            if i + 1 >= len(rest):
+                _die("--upstream needs an address: [https://]host[:port][/prefix]")
+            upstream = rest[i + 1]
+            del rest[i:i + 2]
+            try:
+                _parse_upstream(upstream)
+            except ValueError as e:
+                _die(str(e))
+        serve(int(rest[0]) if rest else DEFAULT_PORT, upstream=upstream)
 
     elif cmd == "ls":
         _print_results(ls(int(rest[0]) if rest else 20))

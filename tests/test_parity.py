@@ -15,7 +15,8 @@ import test_curldb as base
 
 EXPRS = ["", "kind=response", "status=409", "status=200,409", "method=PUT", "path=/chat", "path~/queries/",
          "header:X-Flag=true", "header:X-Verdict", "header:x-verdict=solid", "-status=409", "-header:X-Archive=true",
-         "-kind=request", "body~fork", "fork", "parent=1", "kind=response header:X-Verdict=shaky", "-plain", "@conflicts"]
+         "-kind=request", "body~fork", "fork", "parent=1", "kind=response header:X-Verdict=shaky", "-plain", "@conflicts",
+         "header:X-Gateway"]
 CRLF = "\r\n"
 
 
@@ -29,13 +30,27 @@ class ParityTests(base.TemporaryDatabase):
         curldb.amend(bad, [("X-Flag", "true")])
         curldb.amend(req, [("X-Archive", "true")])
         curldb.save_query("conflicts", "status=409")
+        # Traffic captured for another host: not an amendment, not a saved query.
+        curldb.add(f"PATCH /{req} HTTP/1.1" + CRLF + "X-Gateway: yes" + CRLF + "X-Archive: true" + CRLF + CRLF, host="api.example.com")
+        curldb.add("PUT /queries/conflicts HTTP/1.1" + CRLF + CRLF + "status=200", host="api.example.com")
         script = Path(__file__).resolve().parent / "viewer_sql.mjs"
         out = subprocess.run(["node", str(script)], input=json.dumps({"exprs": EXPRS, "saved": curldb.saved_queries()}),
                              capture_output=True, text=True,
                              encoding="utf-8", timeout=60)
         self.assertEqual(out.returncode, 0, out.stderr)
+        view = subprocess.run(["node", str(script)], input=json.dumps({"view": True}), capture_output=True, text=True,
+                              encoding="utf-8", timeout=60)
+        self.assertEqual(view.returncode, 0, view.stderr)
         conn = curldb._connect()
         try:
+            # The viewer's own view must agree with the Python one, row for row.
+            conn.executescript(json.loads(view.stdout)["view"].replace("effective_headers", "viewer_effective"))
+            ours = sorted(conn.execute("SELECT record_id, name, value FROM effective_headers"))
+            theirs = sorted(conn.execute("SELECT record_id, name, value FROM viewer_effective"))
+            self.assertEqual(ours, theirs)
+            self.assertIn((req, "X-Archive", "true"), ours)
+            self.assertNotIn((req, "X-Gateway", "yes"), ours)
+            self.assertEqual(curldb.saved_queries(), {"conflicts": "status=409"})
             for plan in json.loads(out.stdout):
                 with self.subTest(expr=plan["expr"]):
                     self.assertNotIn("error", plan, plan.get("error"))

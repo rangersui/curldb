@@ -16,7 +16,7 @@
     served: null,               // {etag, events} when the page came from curldb serve
     folder: "inbox",            // inbox (responses) | outbox (requests) | notes | flagged | archived | all
     read: {},                   // record id -> true, this browser's own reading state
-    schema: { parent: false }   // does this file have the parent column (0.4+)?
+    schema: { parent: false, host: false }   // parent column (0.4+), host column (0.6+)
   };
 
   // ---- panes ----------------------------------------------------------
@@ -123,14 +123,16 @@
   function loadBuffer(buffer, name, size, mode, generation) {
     return ready.then(function () {
       if (generation !== S.live.generation) return false;
-      var fresh, schema = { parent: false };
+      var fresh, schema = { parent: false, host: false };
       try {
         fresh = new S.SQL.Database(new Uint8Array(buffer));
         fresh.exec("SELECT id FROM records LIMIT 1");
         fresh.exec("SELECT name, value FROM headers LIMIT 1");
-        fresh.exec(EFFECTIVE_VIEW);   // this copy is private; the view overlays PATCH /n amendments
         var cols = fresh.exec("PRAGMA table_info(records)");
-        schema.parent = !!(cols && cols[0] && cols[0].values.some(function (c) { return c[1] === "parent"; }));
+        var names = cols && cols[0] ? cols[0].values.map(function (c) { return c[1]; }) : [];
+        schema.parent = names.indexOf("parent") >= 0;
+        schema.host = names.indexOf("host") >= 0;
+        fresh.exec(effectiveView(schema.host));   // this copy is private; the view overlays PATCH /n amendments
       } catch (e) {
         if (fresh) fresh.close();
         throw new Error("not a curldb file: " + e.message);
@@ -177,10 +179,14 @@
   // Same definition as curldb's _init: amendments are `PATCH /12` records
   // whose headers replace record 12's headers of the same name; an empty
   // value clears the name. Older files have no view, so the copy gets one.
+  // A PATCH /n addressed to some other host (a gateway or replay record,
+  // host column set) is that host's traffic, not an amendment here.
+  function ownClause(hasHost) { return hasHost ? " AND host IS NULL" : ""; }
+  function effectiveView(hasHost) { return EFFECTIVE_VIEW.replace("{OWN}", ownClause(hasHost)); }
   var EFFECTIVE_VIEW =
     "DROP VIEW IF EXISTS effective_headers; CREATE VIEW effective_headers AS " +
     "WITH amendrec AS (SELECT id, CAST(substr(path, 2) AS INTEGER) AS target FROM records WHERE kind = 'request' " +
-    " AND method = 'PATCH' AND path GLOB '/[0-9]*' AND path NOT GLOB '/*[^0-9]*'), " +
+    " AND method = 'PATCH'{OWN} AND path GLOB '/[0-9]*' AND path NOT GLOB '/*[^0-9]*'), " +
     "amend AS (SELECT p.id AS aid, h.rowid AS hid, p.target, h.name, h.value FROM amendrec p JOIN headers h ON h.record_id = p.id " +
     " WHERE lower(h.name) <> 'via'), " +
     "latest AS (SELECT a.target, a.name, a.value FROM amend a WHERE (a.aid, a.hid) = (SELECT b.aid, b.hid FROM amend b " +
@@ -421,7 +427,7 @@
     // Folder counts use the folder's own rule: not archived, no bookkeeping.
     var byKind = {};
     rows("SELECT CASE WHEN r.kind = 'response' THEN 'response' WHEN r.kind = 'request' THEN 'request' ELSE 'note' END AS k, count(*) AS n FROM records r" +
-         " WHERE NOT " + ARCHIVED_CLAUSE + " AND NOT " + BOOKKEEPING_CLAUSE + " GROUP BY k").forEach(function (k) { byKind[k.k] = k.n; });
+         " WHERE NOT " + ARCHIVED_CLAUSE + " AND NOT " + bookkeepingClause() + " GROUP BY k").forEach(function (k) { byKind[k.k] = k.n; });
     // A mailbox: what came in (responses) and what went out (requests);
     // notes are neither. Flag and archive cut across all of them.
     [["inbox", "inbox", "responses", byKind.response], ["outbox", "outbox", "requests", byKind.request],
@@ -528,13 +534,16 @@
   // The clauses the folders are made of (r is the records row).
   var ARCHIVED_CLAUSE = "EXISTS (SELECT 1 FROM effective_headers x WHERE x.record_id = r.id AND lower(x.name) = 'x-archive' AND x.value = 'true')";
   var FLAGGED_CLAUSE = "EXISTS (SELECT 1 FROM effective_headers x WHERE x.record_id = r.id AND lower(x.name) = 'x-flag' AND x.value = 'true')";
-  var BOOKKEEPING_CLAUSE = "(r.kind = 'request' AND ((r.method = 'PATCH' AND r.path GLOB '/[0-9]*' AND r.path NOT GLOB '/*[^0-9]*') OR r.path GLOB '/queries/?*'))";
+  function bookkeepingClause() {
+    return "(r.kind = 'request'" + (S.schema.host ? " AND r.host IS NULL" : "") +
+      " AND ((r.method = 'PATCH' AND r.path GLOB '/[0-9]*' AND r.path NOT GLOB '/*[^0-9]*') OR r.path GLOB '/queries/?*'))";
+  }
 
   // Saved queries are `PUT /queries/<name>` records, latest wins, a
   // `DELETE /queries/<name>` removes one. `@name` in a query expands.
   function savedQueries() {
     var out = {};
-    rows("SELECT method, path, body FROM records WHERE kind = 'request' AND path GLOB '/queries/?*' AND method IN ('PUT', 'DELETE') ORDER BY id")
+    rows("SELECT method, path, body FROM records WHERE kind = 'request'" + ownClause(S.schema.host) + " AND path GLOB '/queries/?*' AND method IN ('PUT', 'DELETE') ORDER BY id")
       .forEach(function (r) { var n = r.path.slice("/queries/".length); if (r.method === "DELETE") delete out[n]; else out[n] = (r.body || "").trim(); });
     return out;
   }
@@ -601,7 +610,7 @@
     // the log, but the two that shape the view, so they are not filters
     // among the tags: inbox is everything not archived, minus the
     // bookkeeping records (amendments, saved queries).
-    var archivedClause = ARCHIVED_CLAUSE, flaggedClause = FLAGGED_CLAUSE, bookkeeping = BOOKKEEPING_CLAUSE;
+    var archivedClause = ARCHIVED_CLAUSE, flaggedClause = FLAGGED_CLAUSE, bookkeeping = bookkeepingClause();
     if (S.folder === "flagged") { wheres.push(flaggedClause); wheres.push("NOT " + bookkeeping); }
     else if (S.folder === "archived") wheres.push(archivedClause);
     else if (S.folder === "all" || explicit) { /* the whole log, or what the query names */ }
@@ -729,11 +738,17 @@
   // request, or the request a reply answers. Pairing is the parent
   // column when the file has it, else the Link rel="parent" header.
   var COLS = "id, kind, status, method, path, raw, ts" ;
+  function hostCol(prefix) { return S.schema.host ? ", " + prefix + "host" : ", NULL AS host"; }
   function fetchRow(id) {
-    return rows("SELECT " + COLS + (S.schema.parent ? ", parent" : ", NULL AS parent") + " FROM records WHERE id = ?", [id])[0] || null;
+    return rows("SELECT " + COLS + (S.schema.parent ? ", parent" : ", NULL AS parent") + hostCol("") + " FROM records WHERE id = ?", [id])[0] || null;
   }
+  // The parent column is the door's own bookkeeping and always counts.
+  // Reading a Link out of the message is the pre-0.4 fallback, and only
+  // for this file's own records: a message that went to or came from
+  // another host (host column set) talks about that host's records.
   function parentOf(p) {
     if (S.schema.parent && p.row.parent) return p.row.parent;
+    if (S.schema.host && p.row.host) return null;
     if (p.parentInMessage) return p.parentInMessage;
     if (p.parentTarget) {
       // An address: the record whose Content-Location it names.
@@ -745,11 +760,13 @@
   function repliesTo(id, p) {
     var seen = {}, out = [];
     function take(list) { list.forEach(function (r) { if (!seen[r.id]) { seen[r.id] = true; out.push(r); } }); }
-    var pcol = S.schema.parent ? ", parent" : ", NULL AS parent", pcolR = S.schema.parent ? ", r.parent" : ", NULL AS parent";
+    var pcol = (S.schema.parent ? ", parent" : ", NULL AS parent") + hostCol(""), pcolR = (S.schema.parent ? ", r.parent" : ", NULL AS parent") + hostCol("r.");
     if (S.schema.parent) take(rows("SELECT " + COLS + pcol + " FROM records WHERE parent = ? ORDER BY id", [id]));
-    // By id in the message, and by address against this record's Content-Location.
+    // By id in the message, and by address against this record's
+    // Content-Location; only this file's own records (see parentOf).
     take(rows("SELECT DISTINCT r." + COLS.split(", ").join(", r.") + pcolR + " FROM records r JOIN headers h ON h.record_id = r.id" +
-              " WHERE LOWER(h.name) = 'link' AND (h.value LIKE ? OR h.value LIKE ?" + (p.address ? " OR h.value LIKE ?" : "") + ") ORDER BY r.id",
+              " WHERE LOWER(h.name) = 'link'" + (S.schema.host ? " AND r.host IS NULL" : "") +
+              " AND (h.value LIKE ? OR h.value LIKE ?" + (p.address ? " OR h.value LIKE ?" : "") + ") ORDER BY r.id",
               ["%</" + id + ">%parent%", "%<" + id + ">%parent%"].concat(p.address ? ["%<" + p.address + ">%parent%"] : [])));
     out.sort(function (a, b) { return a.id - b.id; });
     return out;
@@ -909,6 +926,7 @@
     getDb: function () { return S.db; }, seq: function () { return S.renderSeq; },
     runQuery: runQuery, showRecord: showRecord, selectRow: selectRow, setPane: setPane, panes: panes,
     setSearchOpen: setSearchOpen, updateQueryUI: updateQueryUI, savedQueries: savedQueries, expandSaved: expandSaved,
-    probeServed: probeServed, openServed: openServed, amendServed: amendServed, markRead: markRead
+    probeServed: probeServed, openServed: openServed, amendServed: amendServed, markRead: markRead,
+    effectiveView: effectiveView, fetchRow: fetchRow, parentOf: parentOf, repliesTo: repliesTo
   };
 })();
