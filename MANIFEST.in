@@ -1,3 +1,6 @@
 include SYSTEM.md
 recursive-include tests *.py
+recursive-include tests *.mjs
 include scripts/check_dist.py
+include scripts/sync_docs.py
+recursive-include curldb/viewer *

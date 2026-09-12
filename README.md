@@ -112,6 +112,11 @@ HEAD /<id>           the headers alone
 GET  /?q=<expr>      same as curldb query
 GET  /tags[/<name>]  same as curldb tags
 GET  /stats          same as curldb stats
+GET  /  (Accept: text/html)   the viewer page, for a browser
+GET  /db             the file as SQLite, ETag = the log tail; records over 256 KB
+                     come without their bytes (X-Light) unless ?full=1, GET /<id> has them
+GET  /events         server-sent events, one per new record
+PATCH /<id>          amends that record's headers (a record itself)
 ```
 
 The body of `GET /<id>` is the raw column, and `Content-Type` names it: `message/http` for a request or response, `text/markdown` for a note, `text/plain` for raw text, `application/octet-stream` for raw bytes that are not text. The other headers describe the record: `X-Id`, `X-Kind`, `X-Status` or `X-Method`, `X-Path`, `Last-Modified` (when it was stored), `X-Last` (the tail), and `Link` with `rel="prev"` and `rel="next"`. `HEAD /<id>` is one line of `curldb ls` in header form.
@@ -137,9 +142,15 @@ A record is bytes. A `message/http` body is stored as sent, line endings include
 
 Bound to localhost, no token. The trust model is the CLI's: whoever can run curl on this machine.
 
-### Reading a file in the browser
+### The mailbox in the browser
 
-[curldb.ai/viewer.html](https://curldb.ai/viewer.html) (`docs/viewer.html` plus `docs/viewer/` in the repo: markup, stylesheet, `render.js` for parsing and rendering, `app.js` for the page) opens a session file dropped onto it: same query language, a tag panel, one record at a time with its raw envelope. Three panes, mail-client style: tags, list, reading pane; each side folds, the reading pane can take the full width, and the widths drag. Keys: `j`/`k` move, `Enter` opens, `Esc` closes, `/` searches, `[` and `]` fold the side panes, `f` is full width. A body is shown by the `Content-Type` the message itself carries: images, audio, video and PDF render; HTML renders in a sandboxed frame with no scripts and no network; JSON is pretty-printed; markdown, CSV, diffs, form data, nested `message/http` and multipart parts render as what they are; everything else is text, and bytes that are not text get a hex dump. Above every record the viewer prints the receipt: the headers `GET /<id>` would answer with (`X-Id`, `X-Kind`, `Last-Modified`, `Link` with parent, prev and next), so the pairing is visible as header lines. `source` shows the record as stored, `save raw` downloads the record bytes, `save body` the body alone, `copy as curl` turns a stored request back into a curl command. Related records (the parent and the children of the open record) sit in a folded section; expanding it previews them with the interval between them. The list marks a reply with `re #12` and the interval since its parent. Search folds to a summary chip when not being edited; `?` shows the syntax and the keys. SQLite runs in the tab as WebAssembly; the file never leaves the machine and `serve` is not involved. Chrome refuses to open files under system folders such as `AppData` through the live picker (the message mentions system files); keep session files in a normal folder. `serve` stays curl-only and sends no CORS headers, so no web page can read the archive through it.
+`curldb serve` is also the mailbox. A browser asking for `http://localhost:200/` gets the viewer page (the same address answers curl with the text list; `Accept` decides), the page loads the file through `GET /db` (records over 256 KB come without their bytes, so a session of PDFs still loads in a moment; opening one fetches it whole with `GET /<id>`), follows it through `GET /events` (server-sent events, one per new record), and files every mark through the ordinary door. Nothing else is needed: same origin, no CORS, no token, no second API.
+
+Flag and archive are the two marks that shape the view, so they are first-class: the sidebar starts with the mailbox folders: `inbox` is the responses that came in, `outbox` the requests that went out, `notes` the notes and files, then `flagged`, `archived` and `everything`; and hovering a row shows a flag and an archive box in its first column; clicking either files the mark without opening the record. The two headers stay out of the tag list below. Marks are records. Flagging record 12 stores `PATCH /12` with `X-Flag: true`; archiving stores `X-Archive: true`; an empty value clears a name. The stored bytes of 12 never change. `headers`, `tags` and `header:` queries see the amended values (the latest `PATCH /12` wins per name, `Via` on the amendment only signs it), `curldb history 12` shows the original and each amendment, and `curldb amend 12 'X-Flag: true'` is the same thing from the shell. A saved query is `PUT /queries/<name>` with the expression as its body, used as `@name`; `DELETE /queries/<name>` removes it. Reading state (which letters this browser has opened) stays in the browser; it is about the reader, not the letter.
+
+The folders hide archived records and the bookkeeping records (`PATCH /<id>`, `/queries/...`); `everything` shows the whole log, and a query that names them (`method=PATCH`, `header:X-Archive=true`) shows them too. Headers that only describe the transport (`Host`, `User-Agent`, `Accept*`, `Cookie`, `Content-Length`, `Date` and the like) are stored with the message and left out of the tag index.
+
+[curldb.ai/viewer.html](https://curldb.ai/viewer.html) is the same page without a door behind it: it opens a session file dropped onto it, or follows one live through the File System Access API (Chrome and Edge). The page lives in `curldb/viewer/` in the package (`index.html`, `viewer.css`, `render.js` for parsing and rendering, `app.js` for the page); `scripts/sync_docs.py` copies it to `docs/` for curldb.ai. Three panes, mail-client style: tags, list, reading pane; each side folds, the reading pane can take the full width, and the widths drag. Keys: `j`/`k` move, `Enter` opens, `Esc` closes, `/` searches, `[` and `]` fold the side panes, `f` is full width. A body is shown by the `Content-Type` the message itself carries: images, audio, video and PDF render; HTML renders in a sandboxed frame with no scripts and no network; JSON is pretty-printed; markdown, CSV, diffs, form data, nested `message/http` and multipart parts render as what they are; code is highlighted by highlight.js (loaded from cdnjs; without it the text is plain) with the language taken from the record's path, such as `GET /abc.py`, or from the media type; everything else is text, and bytes that are not text get a hex dump. Above every record the viewer prints the receipt: the headers `GET /<id>` would answer with. `source` shows the record as stored, `save raw` downloads the record bytes, `save body` the body alone, `copy as curl` turns a stored request back into a curl command. Related records (the parent and the children of the open record) sit in a folded section; expanding it previews them with the interval between them. Search folds to a summary chip when not being edited; `?` shows the syntax and the keys. Chrome refuses to open files under system folders such as `AppData` through the live picker; keep session files in a normal folder.
 
 ## Querying afterwards
 
@@ -191,6 +202,7 @@ header:X-Verdict=solid  header value equals
 body~fork               body full-text search
 body~"exact phrase"     body phrase search
 anyword                 bare word, body search
+-status=200             a leading - negates a token: -header:X-Archive=true, -word
 ```
 
 Full-text search uses FTS5 with the trigram tokenizer (SQLite 3.34+), so CJK substrings match directly; older SQLite falls back to unicode61 + LIKE, and `curldb stats` shows which one is in use.
@@ -357,6 +369,11 @@ HEAD /<id>           只要 header
 GET  /?q=<expr>      同 curldb query
 GET  /tags[/<name>]  同 curldb tags
 GET  /stats          同 curldb stats
+GET  /  (Accept: text/html)   viewer 页面,给浏览器
+GET  /db             整个文件,SQLite 格式,ETag 是日志尾巴;超过 256 KB 的记录
+                     不带字节(X-Light),要整份加 ?full=1,单条用 GET /<id>
+GET  /events         server-sent events,一条新记录一个事件
+PATCH /<id>          修订那条记录的 header(本身也是一条记录)
 ```
 
 `GET /<id>` 的 body 是 raw 列,`Content-Type` 说明它是什么:request 和 response 是 `message/http`,note 是 `text/markdown`,raw 是 `text/plain`,不是文本的 raw 字节是 `application/octet-stream`。其余 header 描述这条记录:`X-Id`、`X-Kind`、`X-Status` 或 `X-Method`、`X-Path`、`Last-Modified`(存入时间)、`X-Last`(尾巴)、`Link` 的 `rel="prev"` 和 `rel="next"`。`HEAD /<id>` 就是 `curldb ls` 里的一行,换成 header 的样子。
@@ -382,9 +399,15 @@ AI 可以直接 curl 进来。本身已经是 HTTP 消息的东西(以 `HTTP/1.1
 
 只绑 localhost,没有 token:信任模型和 CLI 一样,能在这台机器上跑 curl 的人。
 
-### 在浏览器里看一个文件
+### 浏览器里的信箱
 
-[curldb.ai/viewer.html](https://curldb.ai/viewer.html)(仓库里是 `docs/viewer.html` 加 `docs/viewer/`:页面、样式、负责解析渲染的 `render.js`、负责页面逻辑的 `app.js`)把 session 文件拖进去就能看:同一套查询语法、tag 面板、逐条看原始信封。三栏,邮件客户端的样子:tag、列表、阅读窗;两边都能收起,阅读窗可以铺满,宽度可拖。按键:`j`/`k` 上下,`Enter` 打开,`Esc` 关闭,`/` 搜索,`[` 和 `]` 收放两侧,`f` 铺满。body 按消息自己带的 `Content-Type` 显示:图片、音频、视频、PDF 直接渲染;HTML 在 sandbox 的 iframe 里渲染,不跑脚本不联网;JSON 格式化;markdown、CSV、diff、表单、套在里面的 `message/http`、multipart 各按本来的样子渲染;其余当文本,不是文本的字节给十六进制。每条记录上方先印一段收据,就是 `GET /<id>` 外层会回的那几个 header(`X-Id`、`X-Kind`、`Last-Modified`、带 parent、prev、next 的 `Link`),配对关系直接以 header 的形式看得见。`source` 看存的原样,`save raw` 下载整条记录的字节,`save body` 只下载 body,`copy as curl` 把存的请求变回一条 curl 命令。打开一条记录,它的 parent 和 children 收在一个折叠区里,展开才渲染,连同彼此之间的间隔。列表里回复标 `re #12` 和距离 parent 的间隔。搜索框不编辑时折成一个摘要,`?` 展开语法和按键。SQLite 以 WebAssembly 跑在标签页里,文件不离开这台机器,和 `serve` 无关。Chrome 的 live 选择器不让打开 `AppData` 这类系统目录下的文件(提示里会说系统文件),session 文件放在普通目录里。`serve` 只给 curl 用,不发 CORS 头,任何网页都读不到档案。
+`curldb serve` 同时就是信箱。浏览器打开 `http://localhost:200/` 拿到的是 viewer 页面(同一个地址给 curl 的还是文本列表,`Accept` 决定),页面通过 `GET /db` 拿到整个文件(超过 256 KB 的记录不带字节,一堆 PDF 的 session 也是秒开,点开哪条才 `GET /<id>` 拉那一条),通过 `GET /events`(server-sent events,一条新记录一个事件)跟着文件长,所有标记都从普通的门寄进去。别的什么都不需要:同源,没有 CORS,没有 token,没有第二套接口。
+
+打旗和归档是决定视图的两个标记,所以是一等公民:左栏最上面是信箱文件夹:`inbox` 是收到的 response,`outbox` 是发出去的 request,`notes` 是笔记和文件,再往下 `flagged`、`archived`、`everything`;鼠标停在一行上,第一列出现小旗和归档框,点哪个就寄哪个标记,不用打开那条。这两个 header 不混在下面的 tag 列表里。标记也是记录。给 12 号打星存的是一条 `PATCH /12`,header 是 `X-Flag: true`;归档是 `X-Archive: true`;值为空表示清掉这个名字。12 号存的字节永远不变。`headers`、`tags` 和 `header:` 查询看到的是修订后的值(同名以最新的 `PATCH /12` 为准,修订上的 `Via` 只是签名),`curldb history 12` 列出原件和每一次修订,`curldb amend 12 'X-Flag: true'` 是同一件事的命令行写法。保存的查询是 `PUT /queries/<name>`,body 是表达式,用的时候写 `@name`;`DELETE /queries/<name>` 删掉。已读状态(这个浏览器打开过哪些信)留在浏览器里,那是读者的事,不是信的事。
+
+文件夹里不显示归档的记录和簿记记录(`PATCH /<id>`、`/queries/...`);`everything` 是整个日志,查询里点名(`method=PATCH`、`header:X-Archive=true`)也会显示。只描述传输的 header(`Host`、`User-Agent`、`Accept*`、`Cookie`、`Content-Length`、`Date` 这类)随消息一起存,不进 tag 索引。
+
+[curldb.ai/viewer.html](https://curldb.ai/viewer.html) 是同一个页面,只是后面没有门:把 session 文件拖进去看,或者用 File System Access API 跟着文件长(Chrome、Edge)。页面在包里的 `curldb/viewer/`(`index.html`、`viewer.css`、负责解析渲染的 `render.js`、负责页面逻辑的 `app.js`),`scripts/sync_docs.py` 把它拷到 `docs/` 给 curldb.ai 用。三栏,邮件客户端的样子:tag、列表、阅读窗;两边都能收起,阅读窗可以铺满,宽度可拖。按键:`j`/`k` 上下,`Enter` 打开,`Esc` 关闭,`/` 搜索,`[` 和 `]` 收放两侧,`f` 铺满。body 按消息自己带的 `Content-Type` 显示:图片、音频、视频、PDF 直接渲染;HTML 在 sandbox 的 iframe 里渲染,不跑脚本不联网;JSON 格式化;markdown、CSV、diff、表单、套在里面的 `message/http`、multipart 各按本来的样子渲染;代码用 highlight.js 上色(从 cdnjs 加载,没有它就是纯文本),语言看记录的路径,比如 `GET /abc.py`,或者看媒体类型;其余当文本,不是文本的字节给十六进制。每条记录上方先印一段收据,就是 `GET /<id>` 外层会回的那几个 header。`source` 看存的原样,`save raw` 下载整条记录的字节,`save body` 只下载 body,`copy as curl` 把存的请求变回一条 curl 命令。打开一条记录,它的 parent 和 children 收在一个折叠区里,展开才渲染,连同彼此之间的间隔。搜索框不编辑时折成一个摘要,`?` 展开语法和按键。Chrome 的 live 选择器不让打开 `AppData` 这类系统目录下的文件,session 文件放在普通目录里。
 
 ## 事后查
 
@@ -436,6 +459,7 @@ header:X-Verdict=solid  header 值等于
 body~fork               body 全文搜索
 body~"exact phrase"     body 短语搜索
 parent=12               回 12 号的记录
+-status=200             开头加 - 是否定:-header:X-Archive=true、-word
 anyword                 裸词,body 搜索
 ```
 

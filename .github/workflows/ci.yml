@@ -27,6 +27,7 @@ jobs:
         with:
           node-version: "22"
       - run: node --test tests/test_viewer.mjs
+      - run: python scripts/sync_docs.py --check
       - run: git diff --check
 
   package:

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import http.client
-from http.server import HTTPServer
+from http.server import ThreadingHTTPServer
 import os
 from pathlib import Path
 import queue
@@ -241,12 +241,12 @@ class HTTPTests(TemporaryDatabase):
 
         def create_server(address, handler):
             handler.log_message = lambda *args: None
-            server = HTTPServer(address, handler)
+            server = ThreadingHTTPServer(address, handler)
             ready.put(server)
             return server
 
         self.thread = threading.Thread(target=curldb.serve, args=(0,), daemon=True)
-        with patch("http.server.HTTPServer", side_effect=create_server):
+        with patch("http.server.ThreadingHTTPServer", side_effect=create_server):
             self.thread.start()
             self.server = ready.get(timeout=5)
         self.addCleanup(self.stop_server)
@@ -255,6 +255,12 @@ class HTTPTests(TemporaryDatabase):
         self.server.shutdown()
         self.thread.join(timeout=5)
         self.assertFalse(self.thread.is_alive(), "HTTP server did not stop")
+
+    def open_snapshot(self, data):
+        path = os.path.join(self.directory, "snapshot-%d.sqlite" % len(os.listdir(self.directory)))
+        with open(path, "wb") as f:
+            f.write(data)
+        return sqlite3.connect(path)
 
     def request(self, method, path, body=None, headers=None):
         client = http.client.HTTPConnection(*self.server.server_address, timeout=5)
@@ -345,7 +351,7 @@ class HTTPTests(TemporaryDatabase):
         with socket.create_connection(self.server.server_address, timeout=5) as s:
             s.sendall(wire)
             reply = s.recv(4096)
-        self.assertTrue(reply.startswith(b"HTTP/1.0 201"), reply)
+        self.assertTrue(reply.startswith(b"HTTP/1.1 201"), reply)
         rid = curldb.last_id()
         status, got, body = self.request("GET", f"/{rid}")
         head, _, stored = body.partition(b"\n\n")
@@ -381,24 +387,24 @@ class HTTPTests(TemporaryDatabase):
         for name, tail in cases.items():
             with self.subTest(name=name):
                 reply = self._raw_exchange(head + tail)
-                self.assertTrue(reply.startswith(b"HTTP/1.0 400"), (name, reply))
+                self.assertTrue(reply.startswith(b"HTTP/1.1 400"), (name, reply))
                 self.assertIn(b"incomplete chunked body", reply)
         self.assertEqual(curldb.stats()["count"], 0)
 
     def test_short_content_length_bodies_are_refused(self):
         head = b"POST /x HTTP/1.1\r\nHost: t\r\n"
         reply = self._raw_exchange(head + b"Content-Length: 5\r\n\r\nabc")
-        self.assertTrue(reply.startswith(b"HTTP/1.0 400"), reply)
+        self.assertTrue(reply.startswith(b"HTTP/1.1 400"), reply)
         self.assertIn(b"body ended after 3 of 5 bytes", reply)
         reply = self._raw_exchange(head + b"Content-Length: five\r\n\r\nabc")
-        self.assertTrue(reply.startswith(b"HTTP/1.0 400"), reply)
+        self.assertTrue(reply.startswith(b"HTTP/1.1 400"), reply)
         self.assertEqual(curldb.stats()["count"], 0)
 
     def test_chunked_with_content_length_stores_one_true_length(self):
         wire = (b"POST /x HTTP/1.1\r\nHost: t\r\nContent-Length: 999\r\n"
                 b"Transfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n")
         reply = self._raw_exchange(wire)
-        self.assertTrue(reply.startswith(b"HTTP/1.0 201"), reply)
+        self.assertTrue(reply.startswith(b"HTTP/1.1 201"), reply)
         stored = curldb.get(curldb.last_id())
         head, _, body = stored.partition(b"\n\n")
         self.assertEqual(body, b"abc")
@@ -523,6 +529,142 @@ class HTTPTests(TemporaryDatabase):
         self.assertEqual(curldb.get(1), b"HTTP/1.1 200 OK\n\nold")
         # Existing rows were paired from their Link headers when the column arrived.
         self.assertEqual(curldb.get_row(3)["parent"], 2)
+
+    def test_transport_headers_are_stored_but_not_tags(self):
+        status, headers, _ = self.request("POST", "/chat", b"hi", {"X-Topic": "fork", "Cookie": "a=b", "Referer": "http://x/"})
+        rid = int(headers["Location"].lstrip("/"))
+        raw = curldb.get(rid)
+        self.assertIn(b"Cookie: a=b", raw)
+        names = {n for n, _ in curldb.headers_of(rid)}
+        self.assertIn("X-Topic", names)
+        for gone in ("Host", "Cookie", "Referer", "Accept-Encoding", "Content-Length"):
+            self.assertNotIn(gone, names)
+        self.assertNotIn("Host", curldb.tags())
+
+    def test_amendments_are_patch_records(self):
+        rid = curldb.add(RAW)
+        status, headers, _ = self.request("PATCH", f"/{rid}", b"", {"X-Flag": "true", "Via": "curldb-viewer"})
+        self.assertEqual(status, 201)
+        aid = int(headers["Location"].lstrip("/"))
+        row = curldb.get_row(aid)
+        self.assertEqual((row["kind"], row["method"], row["path"], row["parent"]), ("request", "PATCH", f"/{rid}", rid))
+        self.assertEqual(dict(curldb.headers_of(rid))["X-Flag"], "true")
+        self.assertEqual([r["id"] for r in curldb.query("header:X-Flag=true")], [rid])
+        self.assertIn("X-Flag", curldb.tags())
+        # Original bytes untouched; the amendment is its own record.
+        self.assertEqual(curldb.get(rid), RAW.encode("utf-8"))
+        # A later PATCH wins; an empty value clears the name.
+        curldb.amend(rid, [("X-Flag", "")])
+        self.assertNotIn("X-Flag", dict(curldb.headers_of(rid)))
+        self.assertEqual(curldb.query("header:X-Flag=true"), [])
+        curldb.amend(rid, [("X-Scope", "review")])
+        self.assertEqual(dict(curldb.headers_of(rid))["X-Scope"], "review")
+        history = curldb.header_history(rid)
+        self.assertEqual([h["ts"] is None for h in history], [True, False, False, False])
+        self.assertEqual(dict(history[0]["headers"])["X-Scope"], "design")
+        with self.assertRaises(KeyError):
+            curldb.amend(999, [("X-Flag", "true")])
+        with self.assertRaises(ValueError):
+            curldb.amend(rid, [("bad name", "x")])
+        # A value is one line; a newline cannot smuggle in a second header.
+        with self.assertRaises(ValueError):
+            curldb.amend(rid, [("X-Note", "hello" + chr(10) + "X-Archive: true")])
+        with self.assertRaises(ValueError):
+            curldb.amend(rid, [("X-Note", "x")], via="a" + chr(13) + "b")
+        self.assertNotIn("X-Archive", dict(curldb.headers_of(rid)))
+        # Inside one PATCH the last value of a name wins, case-insensitively.
+        curldb.add(f"PATCH /{rid} HTTP/1.1" + chr(10) + "X-Flag: true" + chr(10) + "x-flag: false" + chr(10) + chr(10))
+        self.assertEqual([v for n, v in curldb.headers_of(rid) if n.lower() == "x-flag"], ["false"])
+
+    def test_a_leading_minus_negates_a_token(self):
+        a = curldb.add(RAW)                                        # 409, X-Scope: design, body has 协议
+        b = curldb.add("HTTP/1.1 200 OK\r\nX-Scope: build\r\n\r\nplain words")
+        c = curldb.add("GET /x HTTP/1.1\r\n\r\n")
+        ids = lambda expr: sorted(r["id"] for r in curldb.query(expr))
+        self.assertEqual(ids("-status=409"), [b, c])
+        self.assertEqual(ids("-kind=request"), [a, b])
+        self.assertEqual(ids("-header:X-Scope"), [c])
+        self.assertEqual(ids("-header:X-Scope=design"), [b, c])
+        self.assertEqual(ids("kind=response -header:X-Scope=design"), [b])
+        self.assertEqual(ids("-plain"), [a, c])
+        self.assertEqual(ids("-path~/x"), [a, b])
+        curldb.amend(a, [("X-Archive", "true")])
+        self.assertEqual(ids("-header:X-Archive=true -method=PATCH"), [b, c])
+
+    def test_saved_queries_are_put_records(self):
+        curldb.add(RAW)
+        rid = curldb.save_query("conflicts", "status=409")
+        self.assertEqual(curldb.get_row(rid)["path"], "/queries/conflicts")
+        self.assertEqual(curldb.saved_queries(), {"conflicts": "status=409"})
+        self.assertEqual(len(curldb.query("@conflicts")), 1)
+        self.assertEqual(len(curldb.query("@conflicts header:X-Scope=design")), 1)
+        curldb.save_query("conflicts", "status=200")
+        self.assertEqual(curldb.query("@conflicts"), [])
+        curldb.add("DELETE /queries/conflicts HTTP/1.1\r\n\r\n")
+        self.assertEqual(curldb.saved_queries(), {})
+        with self.assertRaises(KeyError):
+            curldb.query("@conflicts")
+        with self.assertRaises(ValueError):
+            curldb.save_query("no spaces", "x")
+
+    def test_db_snapshot_viewer_page_and_events(self):
+        rid = curldb.add(RAW)
+        status, headers, data = self.request("GET", "/db")
+        self.assertEqual((status, headers["Content-Type"]), (200, "application/vnd.sqlite3"))
+        self.assertTrue(data.startswith(b"SQLite format 3"))
+        self.assertEqual(headers["ETag"], f'"{rid}"')
+        status, _, _ = self.request("GET", "/db", headers={"If-None-Match": headers["ETag"]})
+        self.assertEqual(status, 304)
+        copy = self.open_snapshot(data)
+        try:
+            self.assertEqual(copy.execute("SELECT count(*) FROM records").fetchone()[0], 1)
+        finally:
+            copy.close()
+        # The page for browsers, the text list for curl, on the same address.
+        status, headers, data = self.request("GET", "/", headers={"Accept": "text/html,*/*"})
+        self.assertEqual((status, headers["Content-Type"]), (200, "text/html; charset=utf-8"))
+        self.assertIn(b"curldb viewer", data)
+        self.assertEqual(headers["Vary"], "Accept")
+        status, headers, data = self.request("GET", "/")
+        self.assertEqual(headers["Content-Type"], "text/plain; charset=utf-8")
+        status, headers, data = self.request("GET", "/viewer/app.js")
+        self.assertEqual((status, headers["Content-Type"][:15]), (200, "text/javascript"))
+        self.assertEqual(self.request("GET", "/viewer/../__init__.py")[0], 404)
+        # Events: connect after rid, add two, read two events.
+        client = http.client.HTTPConnection(*self.server.server_address, timeout=5)
+        client.request("GET", f"/events?after={rid - 1}")
+        response = client.getresponse()
+        self.assertEqual(response.headers["Content-Type"], "text/event-stream")
+        a = curldb.add(RAW)
+        b = curldb.add("GET /x HTTP/1.1\r\n\r\n")
+        seen = b""
+        while b"data: /%d" % b not in seen:
+            seen += response.fp.readline()
+        self.assertIn(b"id: %d\ndata: /%d\n\n" % (a, a), seen)
+        self.assertIn(b"id: %d\ndata: /%d\n\n" % (rid, rid), seen)   # ?after=N replays from N+1
+        client.close()
+        import time as _time
+        _time.sleep(0.8)   # the events handler notices the hangup and lets go of the file
+
+    def test_light_snapshot_leaves_big_bytes_to_get_id(self):
+        small = curldb.add(RAW)
+        big = curldb.add("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n".encode() + bytes(300 * 1024))
+        status, headers, data = self.request("GET", "/db")
+        self.assertEqual(headers["X-Light"], str(curldb.LIGHT_OVER))
+        self.assertLess(len(data), 100 * 1024)
+        copy = self.open_snapshot(data)
+        try:
+            rows = dict(copy.execute("SELECT id, length(raw) FROM records").fetchall())
+            self.assertEqual(rows[big], 0)
+            self.assertGreater(rows[small], 0)
+            self.assertEqual(copy.execute("SELECT count(*) FROM headers WHERE record_id=?", (big,)).fetchone()[0], 1)
+        finally:
+            copy.close()
+        status, headers, data = self.request("GET", "/db?full=1")
+        self.assertNotIn("X-Light", headers)
+        self.assertGreater(len(data), 300 * 1024)
+        status, headers, body = self.request("GET", f"/{big}")
+        self.assertEqual(len(body), len(curldb.get(big)))
 
     def test_last_id_header_and_stats(self):
         status, headers, _ = self.request("HEAD", "/")

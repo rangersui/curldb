@@ -37,7 +37,9 @@ def main() -> None:
         license_path = metadata_path.rsplit("/", 1)[0] + "/licenses/LICENSE"
         require(license_path in names, "Wheel is missing LICENSE")
         version = metadata["Version"]
-        tree = ast.parse(wheel.read("curldb.py").decode("utf-8"))
+        tree = ast.parse(wheel.read("curldb/__init__.py").decode("utf-8"))
+        for asset in ("index.html", "app.js", "render.js", "viewer.css"):
+            require("curldb/viewer/" + asset in names, f"Wheel is missing the viewer file {asset}")
         code_version = next(
             ast.literal_eval(node.value) for node in tree.body
             if isinstance(node, ast.Assign)
@@ -47,7 +49,8 @@ def main() -> None:
 
     with tarfile.open(sources[0]) as source:
         prefix = f"curldb-{version}/"
-        required = {"SYSTEM.md", "LICENSE", "README.md", "pyproject.toml", "curldb.py",
+        required = {"SYSTEM.md", "LICENSE", "README.md", "pyproject.toml", "curldb/__init__.py",
+                    "curldb/__main__.py", "curldb/viewer/index.html", "curldb/viewer/app.js",
                     "MANIFEST.in", "tests/test_curldb.py", "scripts/check_dist.py"}
         missing = {prefix + name for name in required} - set(source.getnames())
         require(not missing, f"Source distribution is missing: {sorted(missing)}")

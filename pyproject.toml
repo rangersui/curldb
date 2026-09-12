@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "curldb"
-version = "0.4.0"
+version = "0.5.0"
 description = "HTTP exchange datastore: raw requests and responses in, structured queries out. One SQLite file per session, zero daemon, zero dependencies."
 readme = "README.md"
 license = "MIT"
@@ -32,4 +32,7 @@ Repository = "https://github.com/rangersui/curldb"
 curldb = "curldb:cli"
 
 [tool.setuptools]
-py-modules = ["curldb"]
+packages = ["curldb"]
+
+[tool.setuptools.package-data]
+curldb = ["viewer/*"]

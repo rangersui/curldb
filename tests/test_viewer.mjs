@@ -6,10 +6,10 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { test } from 'node:test';
 
-const html = readFileSync(new URL('../docs/viewer.html', import.meta.url), 'utf8');
+const html = readFileSync(new URL('../curldb/viewer/index.html', import.meta.url), 'utf8');
 const scripts = Array.from(html.matchAll(/<script src="(viewer\/[^"]+)"><\/script>/g), m => m[1]);
 assert.deepEqual(scripts, ['viewer/render.js', 'viewer/app.js'], 'viewer.html loads the two page scripts in order');
-const sources = scripts.map(p => readFileSync(new URL('../docs/' + p, import.meta.url), 'utf8'));
+const sources = scripts.map(p => readFileSync(new URL('../curldb/viewer/' + p.split('/').pop(), import.meta.url), 'utf8'));
 function deferred() {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -26,7 +26,7 @@ function harness(options = {}) {
     const events = new Map(), attributes = new Map();
     return { textContent: '', innerHTML: '', hidden: false, className: '', tagName: 'DIV', open: false,
       value: '', children: [], style: { setProperty() {}, getPropertyValue() {} },
-      classList: { add() {}, remove() {}, toggle() {} },
+      classList: { add() {}, remove() {}, toggle() {} }, querySelector: () => null,
       setAttribute(n, v) { attributes.set(n, v); }, getAttribute(n) { return attributes.get(n); },
       addEventListener(n, fn) { if (!events.has(n)) events.set(n, []); events.get(n).push(fn); },
       dispatch(n, e = {}) { for (const fn of events.get(n) || []) fn.call(this, { target: this, ...e }); },
@@ -60,6 +60,7 @@ function harness(options = {}) {
     document: { getElementById: getElement, createElement: element,
       createTextNode: text => ({ textContent: text }), addEventListener(n, fn) { documentEvents.set(n, fn); } },
     window: {}, navigator: {}, localStorage: { getItem: () => null }, TextDecoder, TextEncoder, Blob,
+    fetch: options.fetch, EventSource: options.EventSource, location: options.location,
     URL: { createObjectURL: () => 'blob:test-' + (++blobId), revokeObjectURL() {} },
     initSqlJs: () => options.ready ? options.ready.promise.then(() => ({ Database })) : Promise.resolve({ Database }),
     setTimeout: fn => { const id = ++timerId; timers.set(id, fn); return id; },
@@ -68,7 +69,7 @@ function harness(options = {}) {
   sources.forEach(src => vm.runInContext(src, context));
   const CV = context.window.CV;
   const h = Object.assign({}, CV, CV.app);
-  return { h, CV, el: getElement, timers, databases, focused: () => focused,
+  return { h, CV, win: context.window, el: getElement, timers, databases, focused: () => focused,
     key(key, target) { documentEvents.get('keydown')({ key, target: target || getElement('list'), preventDefault() {} }); } };
 }
 
@@ -383,4 +384,146 @@ test('related records are folded and rendered only after expansion', async () =>
   h.showRecord(2);
   await new Promise(resolve => setImmediate(resolve));
   assert.match(el('detail').innerHTML, /id="related">/, 'another record starts folded');
+});
+
+test('code bodies get a language from the path or the type and fall back without highlight.js', async () => {
+  const { h, CV } = harness();
+  assert.equal(h.langFor('/abc.py', ''), 'python');
+  assert.equal(h.langFor('/viewer/app.js', 'text/plain'), 'javascript');
+  assert.equal(h.langFor('/x', 'application/javascript'), 'javascript');
+  assert.equal(h.langFor('/notes/plan', 'text/plain'), null);
+  assert.equal(h.highlight('x = 1', 'python'), null, 'no highlight.js in the harness');
+  assert.equal(h.codeHtml('a < b', 'python'), '<pre>a &lt; b</pre>');
+  const enc = s => new TextEncoder().encode(s);
+  assert.equal(await CV.renderBody(enc('a < b'), 'text/plain', '', 0, '/abc.py'), '<pre>a &lt; b</pre>');
+});
+
+test('with highlight.js present, code renders through it and markdown fences pass the language', () => {
+  const { h, CV, win } = harness();
+  const calls = [];
+  win.hljs = { getLanguage: l => l === 'python' || l === 'bash', highlight: (t, o) => { calls.push(o.language); return { value: '<span class="hljs-x">' + t + '</span>' }; } };
+  assert.equal(h.codeHtml('print(1)', 'python'), '<pre><code class="hljs"><span class="hljs-x">print(1)</span></code></pre>');
+  assert.equal(h.codeHtml('plain', 'cobol'), '<pre>plain</pre>');
+  const md = CV.renderMarkdown('```py\nprint(2)\n```\n\n```\nnone\n```');
+  assert.match(md, /<pre><code class="hljs"><span class="hljs-x">print\(2\)<\/span><\/code><\/pre>/);
+  assert.match(md, /<pre><code>none<\/code><\/pre>/);
+  assert.deepEqual(calls, ['python', 'python']);
+});
+
+test('saved queries expand from PUT /queries records and bookkeeping stays out of the list', async () => {
+  const { h } = harness({ query: (sql, params) => {
+    if (sql.includes("GLOB '/queries/?*'")) return [
+      { method: 'PUT', path: '/queries/conflicts', body: 'status=409' },
+      { method: 'PUT', path: '/queries/old', body: 'status=200' },
+      { method: 'DELETE', path: '/queries/old', body: '' },
+    ];
+    return [];
+  } });
+  await h.openFile(file('queries.sqlite', 1));
+  assert.deepEqual(Object.assign({}, h.savedQueries()), { conflicts: 'status=409' });
+  assert.equal(h.expandSaved('@conflicts header:X-Flag=true'), 'status=409 header:X-Flag=true');
+  assert.throws(() => h.expandSaved('@missing'), /no saved query/);
+  const built = h.buildSql('@conflicts');
+  assert.match(built.sql, /x-archive/);
+  assert.match(built.sql, /r\.kind = 'response'/);
+  h.S.folder = "outbox";
+  assert.match(h.buildSql('@conflicts').sql, /PATCH/);
+  h.S.folder = "inbox";
+  h.S.folder = "all";
+  assert.doesNotMatch(h.buildSql('@conflicts').sql, /x-archive/);
+  h.S.folder = "flagged";
+  assert.match(h.buildSql('').sql, /x-flag/);
+  h.S.folder = "archived";
+  assert.doesNotMatch(h.buildSql('').sql, /NOT EXISTS/);
+  h.S.folder = "outbox";
+  assert.match(h.buildSql('').sql, /r\.kind = 'request'/);
+  h.S.folder = "notes";
+  assert.match(h.buildSql('').sql, /r\.kind IN \('note', 'raw'\)/);
+  h.S.folder = "inbox";
+  assert.match(h.buildSql('').sql, /r\.kind = 'response'/);
+  assert.doesNotMatch(h.buildSql('header:X-Archive=true').sql, /NOT EXISTS/);
+  assert.match(h.buildSql('header:X-Flag=true').sql, /JOIN effective_headers/);
+});
+
+test('a leading minus negates a token in the viewer query too', () => {
+  const { h } = harness();
+  h.S.folder = 'all';
+  const a = h.buildSql('-status=409');
+  assert.match(a.sql, /NOT COALESCE\(\(r\.status IN \(\?\)\), 0\)/);
+  const b = h.buildSql('-header:X-Archive=true');
+  assert.match(b.sql, /NOT EXISTS \(SELECT 1 FROM effective_headers x/);
+  assert.doesNotMatch(b.sql, /JOIN effective_headers h/);
+  assert.deepEqual(Array.from(b.params), ['X-Archive', 'true']);
+  assert.match(h.buildSql('-plain').sql, /r\.body NOT LIKE \?/);
+  assert.match(h.buildSql('-header:X-Scope').sql, /NOT EXISTS/);
+});
+
+function servedHarness() {
+  // A door that answers GET /db from a script: each call takes the next reply.
+  const replies = [], streams = [];
+  const fetch = async (url, init) => {
+    const next = replies.shift();
+    if (!next) throw new Error('no reply scripted for ' + url);
+    if (next instanceof Error) throw next;
+    return { ok: true, status: 200, headers: { get: h => h === 'ETag' ? next.etag : null }, arrayBuffer: async () => (next.body || new Uint8Array([next.marker])).buffer };
+  };
+  class EventSource { constructor(url) { this.url = url; streams.push(this); } close() { this.closed = true; } }
+  const h = harness({ fetch, EventSource, location: { protocol: 'http:', host: 'door' } });
+  return Object.assign(h, { replies, streams });
+}
+
+test('served mode: a failed reload is retried with backoff until one lands', async () => {
+  const { h, el, timers, replies, streams } = servedHarness();
+  replies.push({ etag: '"5"', marker: 1 });
+  await h.openServed();
+  assert.equal(h.S.served.etag, '"5"');
+  assert.equal(streams[0].url, '/events?after=5');
+  replies.push(new Error('door down'));
+  streams[0].onmessage({ data: '/6' });
+  let [id, fn] = timers.entries().next().value; timers.delete(id);
+  await fn(); await new Promise(r => setImmediate(r));
+  assert.match(el('load-state').textContent, /reload failed: door down; retrying in 1 s/);
+  assert.equal(h.S.served.backoff, 1000);
+  assert.equal(timers.size, 1, 'a retry is scheduled');
+  replies.push({ etag: '"6"', marker: 2 });
+  [id, fn] = timers.entries().next().value; timers.delete(id);
+  await fn(); await new Promise(r => setImmediate(r));
+  assert.equal(h.S.served.etag, '"6"');
+  assert.equal(h.getDb().marker, 2);
+  assert.equal(el('load-state').textContent, '');
+  assert.equal(h.S.served.backoff, 0);
+});
+
+test('served mode: a stale reload error does not label the file that replaced it', async () => {
+  const { h, el, timers, replies, streams } = servedHarness();
+  replies.push({ etag: '"5"', marker: 1 });
+  await h.openServed();
+  let pendingReject;
+  replies.push(new Proxy(new Error('late failure'), {}));
+  streams[0].onmessage({ data: '/6' });
+  const [id, fn] = timers.entries().next().value; timers.delete(id);
+  const inflight = fn();
+  await h.openFile(file('other.sqlite', 3));   // a dropped file takes over
+  assert.equal(streams[0].closed, true);
+  await inflight; await new Promise(r => setImmediate(r));
+  assert.equal(h.getDb().marker, 3);
+  assert.equal(el('load-state').textContent, '');
+  assert.equal(el('mode').textContent, 'snapshot');
+});
+
+test('served mode: a record the light snapshot left empty is fetched from the door when opened', async () => {
+  const { h, CV, el, replies, streams } = servedHarness();
+  const fixture = { id: 9, kind: 'response', method: null, status: 200, path: null, ts: 1, preview: 'big', raw: new Uint8Array(0), parent: null };
+  h.S.db = null;
+  replies.push({ etag: '"9"', marker: 1 });
+  await h.openServed();
+  // fetchRow reads through the fake Database; hand it the empty-raw row.
+  h.S.db.prepare = sql => { const data = sql.includes('WHERE id = ?') ? [fixture] : []; let i = -1; return { bind() {}, step: () => ++i < data.length, getAsObject: () => data[i], free() {} }; };
+  const seen = [];
+  CV.renderRecord = async p => { seen.push(p.bytes.length); return '<pre>ok</pre>'; };
+  replies.push({ etag: null, marker: 65, body: new TextEncoder().encode('HTTP/1.1 200 OK\r\n\r\nbig body') });
+  h.selectRow(9);
+  assert.match(el('detail').innerHTML, /Loading #9/);
+  await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r));
+  assert.ok(seen.length >= 1 && seen[0] > 0, 'rendered with the fetched bytes, not the empty snapshot row');
 });
