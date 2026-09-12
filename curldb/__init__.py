@@ -523,16 +523,25 @@ def _amend_target(p: dict) -> int | None:
     return None
 
 
+_HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+
+
+def _check_headers(headers: list[tuple[str, str]]) -> None:
+    """Header names are tokens and values are one line, so a pair cannot
+    smuggle in a second field or end the head early."""
+    for name, value in headers:
+        if not name or not _HEADER_NAME.fullmatch(name):
+            raise ValueError(f"not a header name: {name!r}")
+        if chr(13) in value or chr(10) in value:
+            raise ValueError(f"a header value is one line: {value!r}")
+
+
 def amend(rid: int, headers: list[tuple[str, str]], via: str = "curldb-cli") -> int:
     """Store `PATCH /<rid>` carrying new header values for record rid.
     An empty value clears that name. Returns the amendment's own id."""
     if get_row(rid) is None:
         raise KeyError(rid)
-    for name, value in headers:
-        if not name or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name):
-            raise ValueError(f"not a header name: {name!r}")
-        if chr(13) in value or chr(10) in value:
-            raise ValueError(f"a header value is one line: {value!r}")
+    _check_headers(headers)
     if via and (chr(13) in via or chr(10) in via):
         raise ValueError(f"a Via value is one line: {via!r}")
     lines = [f"PATCH /{rid} HTTP/1.1"] + [f"{n}: {v}" for n, v in headers]
@@ -857,6 +866,216 @@ def last_id() -> int:
     return int(last or 0)
 
 # -----------------------------------------------
+# REPLAY
+# -----------------------------------------------
+#
+# A stored request goes back onto the wire as the bytes it is, and what
+# comes back is stored as its answer. The wire is the only place a stored
+# message is sent to; serve never hands a stored response out as a reply.
+
+
+def _read_chunked(rfile) -> bytes:
+    """Join a chunked body. Raises ValueError on a short chunk, a
+    missing chunk terminator, a bad size, or a stream that ends
+    before the zero-length chunk."""
+    parts = []
+    while True:
+        line = rfile.readline()
+        if not line:
+            raise ValueError("stream ended before the last chunk")
+        size = int(line.split(b";")[0].strip(), 16)
+        if size == 0:
+            while True:
+                trailer = rfile.readline()
+                if not trailer:
+                    raise ValueError("stream ended inside the trailer")
+                if not trailer.strip():
+                    return b"".join(parts)
+        chunk = rfile.read(size)
+        if len(chunk) != size:
+            raise ValueError(f"chunk of {size} bytes ended after {len(chunk)}")
+        if rfile.readline().strip():
+            raise ValueError("chunk not followed by an empty line")
+        parts.append(chunk)
+
+
+def _split_message(raw: bytes) -> tuple[bytes, list[bytes], bytes]:
+    """(first line, header lines, body) of a stored message; the head may
+    use either line ending."""
+    cuts = [i for i in (raw.find(b"\r\n\r\n"), raw.find(b"\n\n")) if i >= 0]
+    if cuts:
+        i = min(cuts)
+        head, body = raw[:i], raw[i + (4 if raw.startswith(b"\r\n\r\n", i) else 2):]
+    else:
+        head, body = raw, b""
+    lines = head.replace(b"\r\n", b"\n").split(b"\n")
+    return lines[0], [l for l in lines[1:] if l.strip()], body
+
+
+def _header_lines(lines: list[bytes], name: str) -> list[str]:
+    return [v.strip().decode("latin-1") for n, _, v in (l.partition(b":") for l in lines)
+            if n.strip().lower() == name.lower().encode()]
+
+
+def _header_line(lines: list[bytes], name: str) -> str | None:
+    found = _header_lines(lines, name)
+    return found[0] if found else None
+
+
+def _body_length(lines: list[bytes]) -> int | None:
+    """The Content-Length a head declares, or None. Several copies must
+    agree; anything else is refused rather than guessed at."""
+    values = _header_lines(lines, "content-length")
+    if not values:
+        return None
+    if len(set(values)) > 1:
+        raise ValueError(f"conflicting Content-Length values: {', '.join(values)}")
+    if not values[0].isdigit():
+        raise ValueError(f"Content-Length is not a number: {values[0]!r}")
+    return int(values[0])
+
+
+def _without_header(lines: list[bytes], name: str) -> list[bytes]:
+    return [l for l in lines if l.partition(b":")[0].strip().lower() != name.lower().encode()]
+
+
+def _read_response(rfile, head_request: bool) -> tuple[int, bytes]:
+    """One HTTP response from the wire: (status, the message as bytes).
+    Framing follows the message: Content-Length, chunked (stored joined
+    with the true length, as the door does), or until the peer closes.
+    Conflicting lengths and any other transfer coding are refused; the
+    response is then not stored. 1xx interim responses are passed over."""
+    while True:
+        head = b""
+        while True:
+            line = rfile.readline()
+            if not line:
+                raise ValueError("connection closed before a response arrived" if not head
+                                 else "connection closed inside the response head")
+            head += line
+            if line in (b"\r\n", b"\n"):
+                break
+        first, lines, _ = _split_message(head)
+        m = _STATUS_LINE.match(first.decode("latin-1"))
+        if not m:
+            raise ValueError(f"not an HTTP response: {first[:60]!r}")
+        status = int(m.group(1))
+        if 100 <= status < 200 and status != 101:
+            continue
+        break
+    codings = [c.strip().lower() for v in _header_lines(lines, "transfer-encoding") for c in v.split(",")]
+    if head_request or status < 200 or status in (204, 304):
+        body = b""
+    elif codings and codings != ["chunked"]:
+        raise ValueError(f"transfer coding {', '.join(codings)}: only chunked is read")
+    elif codings:
+        body = _read_chunked(rfile)
+        eol = b"\r\n" if b"\r\n" in head else b"\n"
+        kept = _without_header(_without_header(lines, "transfer-encoding"), "content-length")
+        head = eol.join([first] + kept + [b"Content-Length: " + str(len(body)).encode()]) + eol + eol
+    elif (n := _body_length(lines)) is not None:
+        body = rfile.read(n)
+        if len(body) != n:
+            raise ValueError(f"response body ended after {len(body)} of {n} bytes")
+    else:
+        body = rfile.read()
+    return status, head + body
+
+
+_HOST_ARG = re.compile(r"(?:(https?)://)?(\[[0-9A-Fa-f:.]+\]|[0-9A-Za-z._-]+)(?::(\d+))?/?")
+
+
+def replay(rid: int, host: str | None = None, headers: list[tuple[str, str]] | None = None,
+           save: bool = True, timeout: float = 30.0) -> dict:
+    """Send stored request rid to the address in its Host header (or to
+    host) and store what comes back as its answer.
+
+    host is [http://|https://]name[:port]; it is the address dialled and
+    it replaces the Host header. Port 443 or https:// means TLS. headers
+    replace the same-named headers of the stored request; an empty value
+    removes the name. A body without Content-Length gets one.
+
+    This resends the message, not the bytes: the head goes out with CRLF
+    line endings whatever the stored copy uses, the body goes out as it
+    is. A request is changed when its request line, headers or body
+    differ from the stored ones. A changed request is stored first, as a
+    new request answering rid, and the response answers that record; an
+    unchanged request is not stored again and the response answers rid.
+
+    Order with save: connect, store the changed request, send, read,
+    store the response. Once the request is stored, a failure at any
+    later step (a send that stops partway, a bad or missing response)
+    leaves it without an answer and raises with its id in the message;
+    whether the peer acted on it is unknown. A connect or TLS handshake
+    failure stores nothing.
+
+    Returns {request, response, status, raw}: the id the response
+    answers, the id of the stored response (None with save=False), the
+    status code, and the response bytes.
+    """
+    import socket
+    import ssl
+    row = get_row(rid)
+    if row is None:
+        raise LookupError(f"#{rid} not found")
+    if row["kind"] != "request":
+        raise ValueError(f"#{rid} is a {row['kind']}, not a request")
+    first, lines, body = _split_message(row["raw"])
+    original = list(lines)
+    if host:
+        m = _HOST_ARG.fullmatch(host.strip())
+        if not m:
+            raise ValueError(f"not an address: {host!r} (write [https://]host[:port])")
+        scheme, name, port = m.groups()
+        authority = name + (":" + port if port else "")
+    else:
+        authority = _header_line(lines, "host")
+        if not authority:
+            raise ValueError(f"#{rid} has no Host header; give a host")
+        m = _HOST_ARG.fullmatch(authority)
+        if not m:
+            raise ValueError(f"#{rid} Host header is not an address: {authority!r}")
+        scheme, name, port = m.groups()
+    port = int(port) if port else (443 if scheme == "https" else 80)
+    tls = scheme == "https" or (scheme is None and port == 443)
+    name = name.strip("[]")
+    edits = ([("Host", authority)] if host else []) + list(headers or [])
+    _check_headers(edits)
+    for n, v in edits:
+        lines = _without_header(lines, n)
+        if v:
+            lines.append(f"{n}: {v}".encode("utf-8"))
+    if body and _header_line(lines, "content-length") is None and not _header_line(lines, "transfer-encoding"):
+        lines.append(b"Content-Length: " + str(len(body)).encode())
+    wire = b"\r\n".join([first] + lines) + b"\r\n\r\n" + body
+    method = first.split()[0] if first.split() else b""
+    changed = lines != original
+
+    sock = socket.create_connection((name, port), timeout=timeout)
+    sent = rid
+    try:
+        if tls:
+            sock = ssl.create_default_context().wrap_socket(sock, server_hostname=name)
+        if save and changed:
+            sent = add(wire, parent=rid)
+        try:
+            sock.sendall(wire)
+            rfile = sock.makefile("rb")
+            try:
+                status, raw = _read_response(rfile, method == b"HEAD")
+            finally:
+                rfile.close()
+        except (OSError, ValueError) as e:
+            raise type(e)(f"#{sent} replay failed, remote outcome unknown, no response stored: {e}") from e
+    finally:
+        sock.close()
+
+    out = {"request": sent, "response": None, "status": status, "raw": raw}
+    if save:
+        out["response"] = add(raw, parent=sent)
+    return out
+
+# -----------------------------------------------
 # SERVE
 # -----------------------------------------------
 #
@@ -1137,28 +1356,7 @@ def serve(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> None:
             self._read(head_only=True)
 
         def _read_chunked(self) -> bytes:
-            """Join a chunked body. Raises ValueError on a short chunk, a
-            missing chunk terminator, a bad size, or a stream that ends
-            before the zero-length chunk."""
-            parts = []
-            while True:
-                line = self.rfile.readline()
-                if not line:
-                    raise ValueError("stream ended before the last chunk")
-                size = int(line.split(b";")[0].strip(), 16)
-                if size == 0:
-                    while True:
-                        trailer = self.rfile.readline()
-                        if not trailer:
-                            raise ValueError("stream ended inside the trailer")
-                        if not trailer.strip():
-                            return b"".join(parts)
-                chunk = self.rfile.read(size)
-                if len(chunk) != size:
-                    raise ValueError(f"chunk of {size} bytes ended after {len(chunk)}")
-                if self.rfile.readline().strip():
-                    raise ValueError("chunk not followed by an empty line")
-                parts.append(chunk)
+            return _read_chunked(self.rfile)
 
         def _store(self) -> None:
             # Body bytes are kept as they came. A chunked body is joined and
@@ -1356,6 +1554,12 @@ curldb -- HTTP exchange datastore (one sqlite file per session)
   amend <id> 'N: v'... store PATCH /<id> with new header values; 'N:' clears
   amend --query '<expr>' 'N: v'...   the same for every matching record
   save-query <name> '<expr>'         store PUT /queries/<name>; use it as @name
+  replay <id>... [--host [https://]H[:port]] [-H 'N: v']... [--no-save]
+                       send a stored request to its Host (or --host) and store
+                       the response as its answer; a request changed by --host
+                       or -H is stored first and answered instead;
+                       --query '<expr>' replays every matching request;
+                       --no-save prints the response and stores nothing
   saved-queries        list saved queries
   query '<expr>'       search records
   tags [name]          every header name/value seen, with counts
@@ -1488,6 +1692,47 @@ def cli(argv: list[str] | None = None) -> None:
                 _die("usage: amend <id> 'Name: value'...")
             aid = amend(rid, pairs)
             print(f"#{aid} PATCH /{rid} +{len(pairs)} headers")
+
+    elif cmd == "replay":
+        usage = "replay <id>... | --query '<expr>'  [--host [https://]H[:port]] [-H 'N: v']... [--no-save]"
+        host, hdrs, save, expr, ids = None, [], True, None, []
+        i = 0
+        while i < len(rest):
+            a = rest[i]
+            if a == "--host" and i + 1 < len(rest):
+                host = rest[i + 1]
+                i += 2
+            elif a in ("-H", "--header") and i + 1 < len(rest):
+                hdrs += _header_args([rest[i + 1]])
+                i += 2
+            elif a == "--query" and i + 1 < len(rest):
+                expr = rest[i + 1]
+                i += 2
+            elif a == "--no-save":
+                save = False
+                i += 1
+            else:
+                ids.append(_int_arg(rest, i, usage))
+                i += 1
+        if expr:
+            # Oldest first, so a batch replays in the order it was recorded.
+            ids += sorted(r["id"] for r in query(expr, limit=None) if r["kind"] == "request")
+        if not ids:
+            _die(f"usage: {usage}")
+        failed = 0
+        for rid in ids:
+            try:
+                out = replay(rid, host=host, headers=hdrs, save=save)
+            except (ValueError, LookupError, OSError) as e:
+                print(f"ERR #{rid}: {e}", file=sys.stderr)
+                failed += 1
+                continue
+            if save:
+                print(f"#{out['response']} {out['status']} re #{out['request']}")
+            else:
+                _write_raw(out["raw"])
+        if failed:
+            sys.exit(1)
 
     elif cmd == "save-query":
         if len(rest) < 2:

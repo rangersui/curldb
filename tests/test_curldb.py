@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import http.client
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
 import queue
@@ -166,6 +166,201 @@ class DatabaseTests(TemporaryDatabase):
         with patch.dict(os.environ, {"CURLDB_PATH": str(self.directory / "other.sqlite")}):
             self.assertEqual(curldb.ls(), [])
         self.assertEqual(curldb.get(first), b"first")
+
+
+class Target(BaseHTTPRequestHandler):
+    """A server to replay against: echoes the body, chunked on /chunked."""
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self.server.seen.append((self.requestline, dict(self.headers), body))
+        if self.path == "/chunked":
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for piece in (b"echo ", body):
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(piece), piece))
+            self.wfile.write(b"0\r\n\r\n")
+            return
+        reply = b"got: " + body
+        self.send_response(201)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(reply)))
+        self.end_headers()
+        self.wfile.write(reply)
+
+    do_GET = do_POST
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+class ReplayTests(TemporaryDatabase):
+    def setUp(self):
+        super().setUp()
+        self.target = ThreadingHTTPServer(("127.0.0.1", 0), Target)
+        self.target.seen = []
+        self.target.daemon_threads = True
+        thread = threading.Thread(target=self.target.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(self.target.server_close)
+        self.addCleanup(self.target.shutdown)
+        self.authority = "127.0.0.1:%d" % self.target.server_address[1]
+
+    def stored(self, host, extra="", body="hello"):
+        return curldb.add(f"POST /chat HTTP/1.1\nHost: {host}\nX-Topic: fork{extra}\n\n{body}".encode())
+
+    def test_unchanged_request_is_sent_as_it_is_and_answered(self):
+        rid = self.stored(self.authority, "\nContent-Length: 5")
+        out = curldb.replay(rid)
+        self.assertEqual(out["status"], 201)
+        self.assertEqual(out["request"], rid)
+        self.assertEqual(out["response"], rid + 1)
+        self.assertTrue(out["raw"].startswith(b"HTTP/1.1 201 Created\r\n"))
+        self.assertTrue(out["raw"].endswith(b"\r\n\r\ngot: hello"))
+        line, headers, body = self.target.seen[0]
+        self.assertEqual((line, headers["Host"], headers["X-Topic"], body), ("POST /chat HTTP/1.1", self.authority, "fork", b"hello"))
+        row = curldb.get_row(rid + 1)
+        self.assertEqual((row["kind"], row["status"], row["parent"], row["raw"]), ("response", 201, rid, out["raw"]))
+        self.assertEqual(curldb.stats()["count"], 2)
+
+    def test_host_and_header_changes_store_the_request_that_went_out(self):
+        rid = self.stored("api.example.com")
+        out = curldb.replay(rid, host="http://" + self.authority, headers=[("Authorization", "Bearer new"), ("X-Topic", "")])
+        line, headers, body = self.target.seen[0]
+        self.assertEqual(headers["Host"], self.authority)
+        self.assertEqual(headers["Authorization"], "Bearer new")
+        self.assertNotIn("X-Topic", headers)
+        self.assertEqual(body, b"hello")   # Content-Length was added for the body
+        sent = curldb.get_row(out["request"])
+        self.assertEqual((sent["kind"], sent["parent"]), ("request", rid))
+        self.assertIn(b"\r\nAuthorization: Bearer new\r\n", sent["raw"])
+        self.assertIn(b"Content-Length: 5", sent["raw"])
+        self.assertNotIn(b"X-Topic", sent["raw"])
+        self.assertEqual(curldb.get_row(out["response"])["parent"], out["request"])
+        self.assertEqual([r["id"] for r in curldb.query(f"parent={rid}")], [out["request"]])
+
+    def test_chunked_response_is_stored_joined(self):
+        rid = curldb.add(f"POST /chunked HTTP/1.1\r\nHost: {self.authority}\r\nContent-Length: 5\r\n\r\nhello".encode())
+        out = curldb.replay(rid)
+        self.assertEqual(out["status"], 200)
+        raw = curldb.get(out["response"])
+        self.assertNotIn(b"Transfer-Encoding", raw)
+        self.assertIn(b"\r\nContent-Length: 10\r\n", raw)
+        self.assertTrue(raw.endswith(b"\r\n\r\necho hello"))
+        self.assertEqual(curldb.get_row(out["response"])["parent"], rid)
+
+    def test_no_save_and_refusals(self):
+        rid = self.stored(self.authority, "\nContent-Length: 5")
+        out = curldb.replay(rid, save=False)
+        self.assertIsNone(out["response"])
+        self.assertEqual(out["status"], 201)
+        self.assertEqual(curldb.stats()["count"], 1)
+        rep = curldb.add(b"HTTP/1.1 200 OK\r\n\r\nx")
+        with self.assertRaisesRegex(ValueError, "is a response"):
+            curldb.replay(rep)
+        with self.assertRaises(LookupError):
+            curldb.replay(999)
+        bare = curldb.add(b"GET /x HTTP/1.1\r\n\r\n")
+        with self.assertRaisesRegex(ValueError, "no Host"):
+            curldb.replay(bare)
+        with self.assertRaisesRegex(ValueError, "not an address"):
+            curldb.replay(bare, host="http://")
+        import socket
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            closed = s.getsockname()[1]
+        with self.assertRaises(OSError):
+            curldb.replay(bare, host=f"127.0.0.1:{closed}", timeout=5)
+        self.assertEqual(curldb.stats()["count"], 3)
+
+    def test_header_edits_are_checked_before_they_reach_the_wire(self):
+        rid = self.stored(self.authority, "\nContent-Length: 5")
+        with self.assertRaisesRegex(ValueError, "one line"):
+            curldb.replay(rid, headers=[("X-Note", "a" + chr(13) + chr(10) + "X-Evil: yes")])
+        with self.assertRaisesRegex(ValueError, "not a header name"):
+            curldb.replay(rid, headers=[("bad name", "x")])
+        with self.assertRaisesRegex(ValueError, "not an address"):
+            curldb.replay(rid, host="127.0.0.1:1" + chr(10) + "X: y")
+        self.assertEqual(self.target.seen, [])
+        self.assertEqual(curldb.stats()["count"], 1)
+
+    def test_changed_request_is_stored_before_a_failed_exchange(self):
+        # A peer that takes the request and hangs up without answering.
+        import socket
+        gate = socket.socket()
+        gate.bind(("127.0.0.1", 0))
+        gate.listen(1)
+        self.addCleanup(gate.close)
+        received = []
+
+        def take_and_drop():
+            conn, _ = gate.accept()
+            received.append(conn.recv(4096))
+            conn.close()
+        threading.Thread(target=take_and_drop, daemon=True).start()
+        rid = self.stored("api.example.com", "\nContent-Length: 5")
+        with self.assertRaisesRegex(ValueError, f"#{rid + 1} replay failed, remote outcome unknown, no response stored: connection closed before a response"):
+            curldb.replay(rid, host="127.0.0.1:%d" % gate.getsockname()[1], timeout=5)
+        self.assertEqual(curldb.get_row(rid + 1)["parent"], rid)
+        self.assertEqual(curldb.get_row(rid + 1)["raw"], received[0])
+        self.assertEqual(curldb.stats()["count"], 2)
+        self.assertEqual(curldb.query(f"parent={rid + 1}"), [])
+        # An unchanged request that cannot be delivered stores nothing.
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            closed = s.getsockname()[1]
+        rid2 = self.stored("127.0.0.1:%d" % closed, "\nContent-Length: 5")
+        with self.assertRaises(OSError):
+            curldb.replay(rid2, timeout=5)
+        self.assertEqual(curldb.stats()["count"], 3)
+
+    def test_bad_response_framing_is_refused(self):
+        import socket
+
+        def peer(reply):
+            gate = socket.socket()
+            gate.bind(("127.0.0.1", 0))
+            gate.listen(1)
+            self.addCleanup(gate.close)
+
+            def serve():
+                conn, _ = gate.accept()
+                conn.recv(4096)
+                conn.sendall(reply)
+                conn.close()
+            threading.Thread(target=serve, daemon=True).start()
+            return "127.0.0.1:%d" % gate.getsockname()[1]
+        rid = self.stored("x", "\nContent-Length: 5")
+        cases = [
+            (b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nContent-Length: 3\r\n\r\nabc", "conflicting Content-Length"),
+            (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\nContent-Length: 3\r\n\r\nabc", "transfer coding gzip, chunked"),
+            (b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nabc", "ended after 3 of 9"),
+            (b"HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\nabc", "not a number"),
+        ]
+        for reply, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    curldb.replay(rid, host=peer(reply), save=False, timeout=5)
+        self.assertEqual(curldb.stats()["count"], 1)
+
+    def test_cli_replays_one_and_by_query(self):
+        first = self.stored(self.authority, "\nContent-Length: 5")
+        second = self.stored(self.authority, "\nContent-Length: 5", "world")
+        out = subprocess.run([sys.executable, str(SCRIPT), "replay", str(first)], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.strip(), f"#{second + 1} 201 re #{first}")
+        out = subprocess.run([sys.executable, str(SCRIPT), "replay", "--query", "header:X-Topic=fork"], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.split(), [f"#{second + 2}", "201", "re", f"#{first}", f"#{second + 3}", "201", "re", f"#{second}"])
+        out = subprocess.run([sys.executable, str(SCRIPT), "replay", str(second + 1)], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("is a response", out.stderr)
+        out = subprocess.run([sys.executable, str(SCRIPT), "replay", str(first), "--no-save"], capture_output=True)
+        self.assertTrue(out.stdout.endswith(b"got: hello"))
+        self.assertEqual(curldb.stats()["count"], 5)
 
 
 class CLITests(TemporaryDatabase):

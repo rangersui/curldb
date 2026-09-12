@@ -182,9 +182,12 @@ curldb tags [name]          header names and values, with counts
 curldb ls [n]               the latest n records (default 20)
 curldb stats                database status
 curldb serve [port]         HTTP door on 127.0.0.1, default 200
+curldb replay <id>          send a stored request to its Host and store the response as its answer
 
 --db PATH or CURLDB_PATH picks the file, default ./curldb.sqlite
 ```
+
+`replay` sends a stored request again and files what comes back with `parent` pointing at it, so the viewer shows the new response under the old request. It resends the message: the head goes out with CRLF line endings, the body as stored. `--host [https://]name[:port]` dials another address and sets the Host header; `-H 'Name: value'` replaces a header, `-H 'Name:'` removes it. A request whose request line, headers or body changed that way is stored first, as a new request answering the old one, and the response answers the new record; an unchanged request is not stored twice. The order is connect, store the changed request, send, read, store the response: a connect or TLS handshake failure stores nothing; once the request is stored, a failure at any later step (a send that stops partway, a bad or missing response) leaves it without an answer and the error names it, since whether the peer acted on it is unknown. `--query '<expr>'` replays every request the query matches, oldest first; `--no-save` prints the response and stores nothing. Port 443 or `https://` means TLS. A chunked response is stored joined with its true `Content-Length`, as the door does; conflicting lengths or another transfer coding are refused and nothing is stored.
 
 ### Query DSL
 
@@ -439,9 +442,12 @@ curldb tags [name]          header 名和值,带计数
 curldb ls [n]               最近 n 条(默认 20)
 curldb stats                数据库状态
 curldb serve [port]         HTTP 门,127.0.0.1,默认 200
+curldb replay <id>          把存过的 request 原样发到它的 Host,response 存回来作为它的回复
 
 --db PATH 或 CURLDB_PATH 选文件,默认 ./curldb.sqlite
 ```
+
+`replay` 把一条存过的 request 再发一次,回来的东西存成新记录,`parent` 指向那条 request,浏览器里新 response 就挂在旧 request 下面。发的是消息,不是字节:头部行尾统一用 CRLF,body 按存的原样发。`--host [https://]name[:port]` 改发到别的地址,同时换掉 Host 头;`-H 'Name: value'` 替换一个头,`-H 'Name:'` 删掉它。请求行、头或 body 因此变了的 request 会先存一条新的(parent 指向旧的),response 挂在新的下面;没变的不重复存。顺序是连接、存改过的 request、发送、读取、存 response:连接或 TLS 握手失败什么都不存;request 一旦存下,后面任何一步失败(发到一半断了、response 不对或没有)都让它留着没有回复,报错里写它的 id,对方有没有执行不知道。`--query '<expr>'` 把查询命中的 request 从旧到新全部重放;`--no-save` 只打印 response,不存。端口 443 或 `https://` 走 TLS。chunked 的 response 合并后存,带真实的 `Content-Length`,和门的做法一样;长度自相矛盾或别的 transfer coding 直接拒绝,不存。
 
 ### query DSL
 
